@@ -1,74 +1,81 @@
 # agent-run-metrics
 
-Наблюдаемость прогонов coding-агентов: **сколько токенов, денег и ретраев
-стоит одна задача** и где именно они сгорают. Self-hosted: данные не покидают
-машину (PushGateway/OTLP ставится у вас).
+Metrics for coding-agent runs: **tokens, cost, tool calls, retries, time from
+edit to gate feedback**. Self-hosted — data never leaves your machine.
 
-Работает с OpenCode (первый адаптер), дальше — Claude Code, Codex CLI и другие
-популярные агенты (адаптеры добавляются по мере).
+Works with OpenCode (first adapter). Claude Code, Codex CLI and others — planned.
 
-## Состав
+## Components
 
-| Путь | Что |
+| Path | What |
 |---|---|
-| `analyzers/opencode/opencode_run_timeline.py` | анализатор прогона по локальной базе OpenCode: таймлайн «ход модели → вызов инструмента → замечание гейта», токены от правки до замечания, проверка «план раньше кода» |
-| `plugin/opencode/metrics.js` | OpenCode-плагин: realtime-счётчики токенов/инструментов → PushGateway (текстовый формат Prometheus) |
-| `dashboards/agent-run-cost.json` | Grafana-дашборд: токены, стоимость, tool calls, context window, edit→gate |
-| `alerts/vmalert.yml` | базовые правила аномалий: всплеск токенов, всплеск ретраев гейтов, медленный фидбек |
+| `analyzers/opencode/opencode_run_timeline.py` | Post-run analyzer: reads local OpenCode DB (read-only), builds a timeline of model turns, tool calls and gate feedback |
+| `plugin/opencode/metrics.js` | OpenCode plugin: realtime counters pushed to PushGateway |
+| `dashboards/agent-run-cost.json` | Grafana dashboard |
+| `alerts/vmalert.yml` | vmalert rules for run anomalies |
 
-## Quickstart — анализатор (1 минута)
-
-Ничего не устанавливает, база читается только на чтение:
+## Analyzer
 
 ```bash
 python3 analyzers/opencode/opencode_run_timeline.py --list
-python3 analyzers/opencode/opencode_run_timeline.py \
-    --session <id> \
-    --gate-regex 'gate:|verifier|гейт' \
-    --watch 'Logging|logback' \
-    --push-gateway http://pushgateway.monitoring:9091 \
+python3 analyzers/opencode/opencode_run_timeline.py --session <id> \
+    --gate-regex 'gate:|verifier' \
+    --push-gateway http://pushgateway:9091 \
     --label user=vasche --label task=BLK-15397
 ```
 
-Итог сессии уходит в PushGateway как batch-job: `agent_session_tokens_total`,
-`agent_session_cost_total`, `agent_session_duration_seconds`,
-`agent_edit_to_gate_seconds`.
+Parameters:
 
-## Quickstart — realtime-плагин OpenCode
+| Flag | Meaning |
+|---|---|
+| `--list` | show recent sessions |
+| `--session ID` | session to analyze (default: latest) |
+| `--gate-regex RE` | text pattern that marks gate feedback in the session |
+| `--watch RE` | file path pattern where the defect is expected |
+| `--plan P` / `--src P` | path substrings to check "plan written before code" |
+| `--push-gateway URL` | push session summary as a batch job |
+| `--label k=v` | extra labels for pushed metrics |
+| `--db PATH` | OpenCode DB path (default `~/.local/share/opencode/opencode.db`) |
+| `--out PREFIX` | output file prefix (default `run`) |
+
+Output: `PREFIX.md` (report) + `PREFIX.timeline.csv` (event timeline).
+
+## Plugin
 
 ```bash
 mkdir -p <project>/.opencode/plugin
 cp plugin/opencode/metrics.js <project>/.opencode/plugin/metrics.js
-
-AGENT_METRICS_PUSHGATEWAY=http://pushgateway.monitoring:9091 \
-AGENT_METRICS_LABELS="user=vasche,profile=test" opencode
 ```
 
-Счётчики: `opencode_agent_tokens_total{kind}`, `opencode_agent_tool_calls_total{tool}`,
-`opencode_agent_context_max_tokens`. Push раз в 15 с при активности и сразу
-по `session.idle`. Ошибки пуша никогда не ломают агента.
+Env:
 
-## Стек
+| Variable | Default | Meaning |
+|---|---|---|
+| `AGENT_METRICS_PUSHGATEWAY` | — (required) | PushGateway URL |
+| `AGENT_METRICS_JOB` | `opencode` | job label |
+| `AGENT_METRICS_INSTANCE` | hostname | instance label |
+| `AGENT_METRICS_LABELS` | — | extra labels, `k=v,k2=v2` |
+
+Pushes `opencode_agent_tokens_total{kind}`, `opencode_agent_tool_calls_total{tool}`,
+`opencode_agent_context_max_tokens` after each tool call (throttled 15s) and on
+session idle. Errors never break the agent.
+
+## Stack
 
 ```text
-OpenCode (плагин) ──▶ PushGateway ──vmagent──▶ VictoriaMetrics ──▶ Grafana
+agent (plugin) ──▶ PushGateway ──vmagent──▶ VictoriaMetrics ──▶ Grafana
 ```
 
-Готовый дашборд — `dashboards/agent-run-cost.json` (импорт в Grafana,
-datasource = ваш Prometheus/VictoriaMetrics). Правила аномалий —
-`alerts/vmalert.yml` (vmalert из пакета VictoriaMetrics).
+Import `dashboards/agent-run-cost.json`, load `alerts/vmalert.yml` into vmalert.
 
-## Лицензия
+## Metrics
 
-Apache-2.0. Продукт self-hosted: данные не покидают вашу инфраструктуру.
+`agent_session_tokens_total`, `agent_session_cost_total`, `agent_session_turns`,
+`agent_session_edits_total`, `agent_session_tool_calls_total`,
+`agent_session_duration_seconds`, `agent_edit_to_gate_seconds{gate}` (analyzer),
+`opencode_agent_tokens_total{kind}`, `opencode_agent_tool_calls_total{tool}`,
+`opencode_agent_context_max_tokens` (plugin).
 
-## Дорожная карта
+## License
 
-- [x] Анализатор OpenCode (таймлайн, токены, гейты, план-до-кода)
-- [x] Пуш итога сессии в PushGateway
-- [x] Базовый плагин OpenCode (realtime-счётчики)
-- [x] Дашборд Grafana + vmalert-правила
-- [ ] Поддержка Claude Code (JSONL-сессии)
-- [ ] Поддержка Codex CLI, Cursor
-- [ ] Token-helper (short-lived identity) для OpenCode/Claude Code
-- [ ] Multi-agent dashboard (несколько агентов на одной панели)
+Apache-2.0

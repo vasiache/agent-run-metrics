@@ -6,6 +6,8 @@
 //   AGENT_METRICS_JOB          job label, default "opencode"
 //   AGENT_METRICS_INSTANCE     instance label, default = hostname
 //   AGENT_METRICS_LABELS       extra labels "user=vasche,profile=test"
+//   AGENT_METRICS_TENANT       tenant label, default "local"
+//   AGENT_METRICS_TOKEN        bearer token (cloud mode), optional
 //
 // Push: after each tool call (throttled 15s) and on session.idle.
 

@@ -1,23 +1,9 @@
 #!/usr/bin/env python3
-"""
-opencode-run-timeline: разбор одного прогона OpenCode по локальной базе.
+"""Timeline of one OpenCode run from the local DB (read-only).
 
-Читает ~/.local/share/opencode/opencode.db только на чтение, ничего никуда не отправляет.
-Строит таймлайн: ходы модели (токены, стоимость), вызовы инструментов (правки/чтения/bash),
-события гейтов (сообщения, совпавшие с --gate-regex), и считает:
-  - сколько токенов и времени прошло от правки файла до замечания гейта;
-  - сколько токенов ушло между разворотами гейтов;
-  - появился ли план раньше первой правки исходников (--plan / --src).
-
-Пример:
-  python3 opencode_run_timeline.py --list
-  python3 opencode_run_timeline.py --session <id> --push-gateway http://pushgateway:9091 \\
-      --label user=vasche --label task=BLK-15397   # итог сессии -> PushGateway (batch-job)
-  python3 opencode_run_timeline.py --session <id> \
-      --gate-regex 'gate:|test\\.logs_failed' \
-      --watch 'Logging|logback' \
-      --plan docs/ai/BLK-15397/plan.md --src smev-fns-service/ \
-      --out report
+Events: model turns (tokens, cost), tool calls, gate feedback (--gate-regex).
+Reports tokens/time from edit to gate feedback, tokens between gate turns,
+and whether the plan was written before the first source edit (--plan/--src).
 """
 import argparse, csv, json, os, re, sqlite3, sys
 from datetime import datetime
@@ -53,7 +39,7 @@ def tok(t):
 
 def connect(path):
     if not os.path.exists(path):
-        sys.exit(f"нет базы: {path}")
+        sys.exit(f"db not found: {path}")
     return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
 
 
@@ -65,14 +51,14 @@ def list_sessions(db):
 
 
 def file_of(inp):
-    """filePath/path/file из input инструмента"""
+    """filePath/path/file from tool input"""
     if not isinstance(inp, dict):
         return ""
     return inp.get("filePath") or inp.get("path") or inp.get("file") or ""
 
 
 def load_events(db, sid, gate_re):
-    """События сессии: ходы модели, вызовы инструментов, замечания гейтов."""
+    """Session events: model turns, tool calls, gate feedback."""
     ev = []
     for mid, mtime, data in db.execute(
             "SELECT id, time_created, data FROM message WHERE session_id=? ORDER BY time_created, id", (sid,)):
@@ -109,7 +95,7 @@ def load_events(db, sid, gate_re):
 
 
 def analyze(ev, watch_re, plan, src):
-    """Сводка прогона + гейты с привязкой к подозрительной правке."""
+    """Run summary + gates linked to the suspect edit."""
     out = {}
     llm = [e for e in ev if e["kind"] == "llm"]
     out["total_tokens"] = sum(e["tokens"] for e in llm)
@@ -139,8 +125,8 @@ def analyze(ev, watch_re, plan, src):
     if plan or src:
         pw = next((e for e in ev if e["kind"] == "edit" and plan and plan in e.get("file", "")), None)
         se = next((e for e in ev if e["kind"] == "edit" and src and src in e.get("file", "")), None)
-        out["plan_first_write"] = ts(pw["t"]) if pw else "не найдено"
-        out["src_first_edit"] = ts(se["t"]) if se else "не найдено"
+        out["plan_first_write"] = ts(pw["t"]) if pw else "not found"
+        out["src_first_edit"] = ts(se["t"]) if se else "not found"
         out["plan_before_code"] = bool(pw and (not se or pw["t"] <= se["t"]))
     return out
 
@@ -148,23 +134,24 @@ def analyze(ev, watch_re, plan, src):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default=DEFAULT_DB)
-    ap.add_argument("--list", action="store_true", help="последние сессии")
-    ap.add_argument("--session", help="id сессии (по умолчанию последняя)")
-    ap.add_argument("--gate-regex", default=r"gate:|verifier|гейт", help="признак замечания гейта в тексте")
-    ap.add_argument("--watch", help="regex путей файлов, где ожидается дефект")
-    ap.add_argument("--plan", help="путь (подстрока) файла плана")
-    ap.add_argument("--src", help="путь (подстрока) исходников")
-    ap.add_argument("--out", default="run", help="префикс выходных файлов")
-    ap.add_argument("--push-gateway", help="PushGateway URL (http://host:9091) — пуш итога сессии как batch-job")
+    ap.add_argument("--list", action="store_true", help="list recent sessions")
+    ap.add_argument("--session", help="session id (default: latest)")
+    ap.add_argument("--gate-regex", default=r"gate:|verifier", help="text pattern marking gate feedback")
+    ap.add_argument("--watch", help="regex of file paths where the defect is expected")
+    ap.add_argument("--plan", help="plan file path substring")
+    ap.add_argument("--src", help="source path substring")
+    ap.add_argument("--out", default="run", help="output file prefix")
+    ap.add_argument("--push-gateway", help="PushGateway URL (http://host:9091) — push session summary as a batch job")
     ap.add_argument("--label", action="append", default=[],
-                    help="метка для PushGateway: key=value (user=vasche, task=BLK-15397, profile=test)")
+                    help="PushGateway label: key=value (user=vasche, task=BLK-15397, profile=test)")
+    ap.add_argument("--tenant", default="local", help="tenant label (cloud mode: from SaaS)")
+    ap.add_argument("--token", help="bearer token for cloud metrics endpoint (optional)")
     a = ap.parse_args()
 
     def push_summary(res, sid):
-        """Итог сессии как batch-job в PushGateway (разовая задача завершилась —
-        финальный пуш). Без внешних зависимостей: сырой POST text-format."""
+        """Push the session summary to PushGateway as a batch job. Raw POST, no deps."""
         import urllib.request
-        extra = "".join(f',{k.split("=",1)[0]}="{k.split("=",1)[1]}"' for k in a.label if "=" in k)
+        extra = f',tenant="{a.tenant}"' + "".join(f',{k.split("=",1)[0]}="{k.split("=",1)[1]}"' for k in a.label if "=" in k)
         base = f'session="{sid}"{extra}'
         lines = [
             "# TYPE agent_session_tokens_total gauge",
@@ -185,9 +172,14 @@ def main():
                 lines.append(f'agent_edit_to_gate_seconds{{session="{sid}",gate="{g["time"]}"}} '
                              f'{int(g["min_edit_to_gate"] * 60)}')
         body = ("\n".join(lines) + "\n").encode()
-        url = f"{a.push_gateway.rstrip('/')}/metrics/job/opencode_agent/session/{sid}"
+        import socket
+        url = (f"{a.push_gateway.rstrip('/')}/metrics/job/opencode_agent"
+               f"/instance/{socket.gethostname()}/session/{sid}")
+        headers = {"Content-Type": "text/plain"}
+        if a.token:
+            headers["Authorization"] = f"Bearer {a.token}"
         urllib.request.urlopen(urllib.request.Request(url, data=body, method="POST",
-                                 headers={"Content-Type": "text/plain"}), timeout=30).read()
+                                 headers=headers), timeout=30).read()
         print(f"pushed -> {url}")
 
     db = connect(a.db)
@@ -210,15 +202,15 @@ def main():
         for e in ev:
             w.writerow([ts(e["t"]), e["kind"], e["tokens"], e["cum"], e["cost"], e["detail"]])
 
-    L = [f"# Прогон: {title}", f"session: `{sid}`", "",
-         "| Метрика | Значение |", "|---|---|"]
+    L = [f"# Run: {title}", f"session: `{sid}`", "",
+         "| Metric | Value |", "|---|---|"]
     for k in ("total_tokens", "total_cost", "turns", "tool_calls", "edits", "duration_min"):
         L.append(f"| {k} | {res.get(k, '')} |")
     if "plan_before_code" in res:
-        L += ["", "## План до кода", f"- план записан: {res['plan_first_write']}",
-              f"- первая правка исходников: {res['src_first_edit']}",
-              f"- план раньше кода: **{'да' if res['plan_before_code'] else 'нет'}**"]
-    L += ["", "## Замечания гейтов", "| время | токенов с прошлого гейта | подозрительная правка | мин от правки | токенов от правки | текст |",
+        L += ["", "## Plan before code", f"- plan written: {res['plan_first_write']}",
+              f"- first source edit: {res['src_first_edit']}",
+              f"- plan before code: **{'yes' if res['plan_before_code'] else 'no'}**"]
+    L += ["", "## Gate feedback", "| time | tokens since prev gate | suspect edit | min from edit | tokens from edit | text |",
           "|---|---|---|---|---|---|"]
     for g in res["gates"]:
         L.append(f"| {g['time']} | {g['tokens_since_prev_gate']} | {g.get('suspect_edit','')} | "
@@ -227,7 +219,7 @@ def main():
         L += ["", "## Todo", *[f"- [{s}] {c}" for _, s, c in todos]]
     open(f"{a.out}.md", "w").write("\n".join(L) + "\n")
     print("\n".join(L))
-    print(f"\nфайлы: {a.out}.md, {a.out}.timeline.csv")
+    print(f"\nfiles: {a.out}.md, {a.out}.timeline.csv")
 
 
 if __name__ == "__main__":
