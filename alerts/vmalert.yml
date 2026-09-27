@@ -1,0 +1,41 @@
+# vmalert rules: agent run anomalies (product 4 — audit package).
+# Thresholds are starting points — tune on 2-3 weeks of your own runs.
+groups:
+  - name: agent-run-anomalies
+    interval: 1m
+    rules:
+      - alert: AgentTokenBurst
+        expr: sum by (instance, user) (increase(agent_tokens_total[30m])) > 5000000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Agent token burst on {{ $labels.instance }} ({{ $value | humanize }} tokens in 30m)"
+          description: "Аномальный расход токенов агентом — проверьте, чем занят агент и какой задачей."
+
+      - alert: AgentGateRetrySpike
+        expr: sum by (gate) (increase(agent_gate_retries_total[1h])) > 3
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Gate {{ $labels.gate }}: больше 3 разворотов за час"
+          description: "Повторные развороты на одном гейте = один и тот же дефект возвращается. Проверить, не сжигаются ли попытки на повтор."
+
+      - alert: AgentDefectFeedbackSlow
+        expr: max_over_time(agent_edit_to_gate_seconds[1h]) > 1800
+        for: 0m
+        labels:
+          severity: info
+        annotations:
+          summary: "От правки до замечания гейта > 30 мин"
+          description: "Замечание приходит, когда контекст правки уже вытеснен — аргумент за fail-fast проверку на шаге."
+
+      - alert: AgentRunWithoutIdentity
+        expr: opencode_agent_tool_calls_total{user=""} > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tool calls без метки user на {{ $labels.instance }}"
+          description: "Агент работает без identity — проверьте, что token-helper/плагин настроен и метка user проставляется."

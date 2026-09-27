@@ -1,1 +1,3 @@
 #gitgnore
+##
+analyzers/opencode/__pycache__/*
