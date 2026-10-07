@@ -1,0 +1,43 @@
+# Local metrics stack for agent-run-metrics.
+#
+#   docker compose up -d
+#   Grafana:  http://localhost:3000  (dashboards → "Agent run cost";
+#            on first open pick the VictoriaMetrics datasource in the dropdown)
+#   Push:     http://localhost:9091  (use as AGENT_METRICS_PUSHGATEWAY)
+#   VM API:   http://localhost:8428
+#
+services:
+  pushgateway:
+    image: prom/pushgateway:latest
+    ports: ["127.0.0.1:9091:9091"]
+
+  victoria-metrics:
+    image: victoriametrics/victoria-metrics:latest
+    command: ["-storageDataPath=/data", "-retentionPeriod=100y"]
+    ports: ["127.0.0.1:8428:8428"]
+    volumes: [vmdata:/data]
+
+  vmagent:
+    image: victoriametrics/vmagent:latest
+    command:
+      - -promscrape.config=/etc/vmagent/vmagent.yml
+      - -remoteWrite.url=http://victoria-metrics:8428/api/v1/write
+    volumes: [./vmagent.yml:/etc/vmagent/vmagent.yml:ro]
+    depends_on: [pushgateway, victoria-metrics]
+
+  grafana:
+    image: grafana/grafana:latest
+    ports: ["127.0.0.1:3000:3000"]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../dashboards:/var/lib/grafana/dashboards:ro
+      - grafana:/var/lib/grafana
+    depends_on: [victoria-metrics]
+
+volumes:
+  vmdata:
+  grafana:
