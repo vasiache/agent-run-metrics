@@ -2,7 +2,7 @@
   "title": "Agent run cost",
   "uid": "agent-run-cost",
   "schemaVersion": 39,
-  "version": 6,
+  "version": 7,
   "editable": true,
   "refresh": "1m",
   "time": {
@@ -117,13 +117,14 @@
           "expr": "sum(agent_tokens_total{runtime=~\"$runtime\",user=~\"$user\",project=~\"$project\"})",
           "refId": "A"
         }
-      ]
+      ],
+      "description": "Sum of all tokens (input, output, cache reads and writes) across the selected sessions, cumulative since each session started. Usually dominated by cache_read, which is normal: every turn re-reads the prompt from cache. Use it for volume, not cost."
     },
     {
       "id": 2,
       "type": "stat",
       "title": "Cost total",
-      "description": "Session cost from the report analyzers (OpenCode emits cost directly; Claude Code reports need a pricing table).",
+      "description": "Money spent per the report analyzers (session_timeline.py / run_timeline.py with --push-gateway). OpenCode reports carry cost directly; Claude Code transcripts have no prices yet, so this stat only moves when OpenCode sessions are analyzed. Reset the time range to see what a period cost.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -172,7 +173,8 @@
           "unit": "short"
         },
         "overrides": []
-      }
+      },
+      "description": "The largest prompt+cache context any selected session reached. Watch it against the model's context limit: when it approaches the limit, the session is close to auto-compaction and loses older detail. A value that keeps growing across one session is normal; a value that jumps back down means a new session or a compaction."
     },
     {
       "id": 4,
@@ -193,7 +195,8 @@
           "expr": "sum(agent_tool_calls_total{runtime=~\"$runtime\",user=~\"$user\",project=~\"$project\",tool=~\"$tool\"})",
           "refId": "A"
         }
-      ]
+      ],
+      "description": "Number of tool executions across the selected sessions. Filter by the Tool variable to see one tool. A high count with flat token spend usually means cheap mechanical work; a high count with exploding tokens means each call carries a big payload (large reads, long outputs)."
     },
     {
       "id": 5,
@@ -221,7 +224,8 @@
           "unit": "short"
         },
         "overrides": []
-      }
+      },
+      "description": "Token burn rate per kind over the last 15 minutes, per runtime. This is the live pulse: input and cache_read spikes mean big prompts being sent right now, output spikes mean the model is writing a lot. Flat lines mean idle or stale sessions still counted in the totals above."
     },
     {
       "id": 6,
@@ -249,13 +253,14 @@
           "unit": "short"
         },
         "overrides": []
-      }
+      },
+      "description": "Five most-used tools, cumulative per session. Compare shapes between runtimes: a coding session is Edit-heavy, research is WebSearch/Read-heavy. Click a legend entry to isolate one series; use the Tool variable to exclude noise like Bash wrappers."
     },
     {
       "id": 7,
       "type": "timeseries",
       "title": "Edit → gate feedback (seconds)",
-      "description": "Время от правки до замечания гейта на той же зоне. Чем короче, тем дешевле дефект.",
+      "description": "Seconds between a source edit and the gate feedback that caught a problem in the same area (from run_timeline.py --gate-regex with a --watch pattern). Short is good: the agent still holds the edit context and fixes it cheaply. Past ~30 minutes the context is gone, which is what the AgentDefectFeedbackSlow alert fires on. Empty when no gate analysis was pushed.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -306,7 +311,8 @@
           "unit": "short"
         },
         "overrides": []
-      }
+      },
+      "description": "Five most-invoked skills (the Skill tool in Claude Code transcripts), cumulative per session. Use it to see which workflows the agent actually runs versus which ones exist. Select a skill in the Skill variable to track its usage over time."
     },
     {
       "id": 9,
@@ -334,13 +340,14 @@
           "unit": "short"
         },
         "overrides": []
-      }
+      },
+      "description": "Five most-invoked plugins, derived from the plugin:skill naming in skill calls. This is where the metrics integration itself shows up too, so a nonzero baseline here is self-monitoring, not a leak. Use it to spot plugins that cost tokens but never earn their keep."
     },
     {
       "id": 10,
       "type": "stat",
       "title": "Active sessions (5 min)",
-      "description": "Session groups pushed within the last 5 minutes (parallel sessions included).",
+      "description": "Session groups that pushed within the last 5 minutes: parallel sessions on this host, counted separately. A number that stays high while you are not working means a hook is still pushing somewhere (a stuck process or another machine with the same instance label).",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
