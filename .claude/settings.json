@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node integrations/claude-code/push-metrics.mjs --self-test integrations/claude-code/fixtures/sample-transcript.jsonl)",
+      "Bash(python3 -c \"import yaml; yaml.safe_load\\(open\\('alerts/vmalert.yml'\\)\\); yaml.safe_load\\(open\\('deploy/vmagent.yml'\\)\\); print\\('yaml OK'\\)\")"
+    ]
+  }
+}

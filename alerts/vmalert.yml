@@ -1,26 +1,19 @@
-# vmalert rules: agent run anomalies (product 4 — audit package).
-# Thresholds are starting points — tune on 2-3 weeks of your own runs.
+# vmalert rules: agent run anomalies.
+# Only metrics that are actually emitted by the realtime plugins and the
+# analyzers. Thresholds are starting points. Tune them on 2-3 weeks of
+# your own runs.
 groups:
   - name: agent-run-anomalies
     interval: 1m
     rules:
       - alert: AgentTokenBurst
-        expr: sum by (instance, user) (increase(agent_tokens_total[30m])) > 5000000
+        expr: sum by (instance, user) (increase({__name__=~"(opencode|claude_code)_agent_tokens_total"}[30m])) > 5000000
         for: 5m
         labels:
           severity: warning
         annotations:
           summary: "Agent token burst on {{ $labels.instance }} ({{ $value | humanize }} tokens in 30m)"
-          description: "Аномальный расход токенов агентом — проверьте, чем занят агент и какой задачей."
-
-      - alert: AgentGateRetrySpike
-        expr: sum by (gate) (increase(agent_gate_retries_total[1h])) > 3
-        for: 0m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Gate {{ $labels.gate }}: больше 3 разворотов за час"
-          description: "Повторные развороты на одном гейте = один и тот же дефект возвращается. Проверить, не сжигаются ли попытки на повтор."
+          description: "Token burn is far above normal for this instance. Check what the agent is working on."
 
       - alert: AgentDefectFeedbackSlow
         expr: max_over_time(agent_edit_to_gate_seconds[1h]) > 1800
@@ -28,14 +21,17 @@ groups:
         labels:
           severity: info
         annotations:
-          summary: "От правки до замечания гейта > 30 мин"
-          description: "Замечание приходит, когда контекст правки уже вытеснен — аргумент за fail-fast проверку на шаге."
+          summary: "Edit-to-gate feedback over 30 min ({{ $labels.instance }})"
+          description: "Gate feedback arrives when the edit context is already displaced, so the agent worked blind on that edit. An argument for fail-fast checks at the step level."
 
       - alert: AgentRunWithoutIdentity
-        expr: opencode_agent_tool_calls_total{user=""} > 0
+        expr: '{__name__=~"(opencode|claude_code)_agent_tool_calls_total",user=""} > 0'
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: "Tool calls без метки user на {{ $labels.instance }}"
-          description: "Агент работает без identity — проверьте, что token-helper/плагин настроен и метка user проставляется."
+          summary: "Tool calls without a user label on {{ $labels.instance }}"
+          description: "Realtime metrics arrive without identity: set AGENT_METRICS_LABELS=user=... (OpenCode plugin) or check that the Claude Code adapter can resolve the user."
+
+# NOTE: no rule for gate retries yet, because no component emits a retries counter.
+# Add one (e.g. agent_gate_retries_total from the analyzer) before alerting on it.

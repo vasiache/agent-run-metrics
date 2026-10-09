@@ -1,95 +1,100 @@
 # agent-run-metrics
 
-Metrics for coding-agent runs: **tokens, cost, tool calls, retries, time from
-edit to gate feedback**. Self-hosted — data never leaves your machine.
+Counters for AI coding agents: how many tokens a session burned, which tools
+it ran, how long it took. The data lands in your own monitoring (Prometheus
+PushGateway, VictoriaMetrics, Grafana) and stays on your infrastructure.
 
-Works with OpenCode and Claude Code. Codex CLI and others — planned.
+Supported agents: OpenCode and Claude Code. Others are planned.
 
-## Components
-
-| Path | What |
-|---|---|
-| `analyzers/opencode/opencode_run_timeline.py` | Post-run analyzer: reads local OpenCode DB (read-only), builds a timeline of model turns, tool calls and gate feedback |
-| `plugin/opencode/metrics.js` | OpenCode plugin: realtime counters pushed to PushGateway |
-| `hooks/claude-code/` | Claude Code adapter: realtime counters via hooks + session transcript (see [hooks/claude-code/README.md](hooks/claude-code/README.md)) |
-| `dashboards/agent-run-cost.json` | Grafana dashboard |
-| `alerts/vmalert.yml` | vmalert rules for run anomalies |
-
-## Analyzer
-
-```bash
-python3 analyzers/opencode/opencode_run_timeline.py --list
-python3 analyzers/opencode/opencode_run_timeline.py --session <id> \
-    --gate-regex 'gate:|verifier' \
-    --push-gateway http://pushgateway:9091 \
-    --label user=vasche --label task=BLK-15397
-```
-
-Parameters:
-
-| Flag | Meaning |
-|---|---|
-| `--list` | show recent sessions |
-| `--session ID` | session to analyze (default: latest) |
-| `--gate-regex RE` | text pattern that marks gate feedback in the session |
-| `--watch RE` | file path pattern where the defect is expected |
-| `--plan P` / `--src P` | path substrings to check "plan written before code" |
-| `--push-gateway URL` | push session summary as a batch job |
-| `--label k=v` | extra labels for pushed metrics |
-| `--db PATH` | OpenCode DB path (default `~/.local/share/opencode/opencode.db`) |
-| `--out PREFIX` | output file prefix (default `run`) |
-
-Output: `PREFIX.md` (report) + `PREFIX.timeline.csv` (event timeline).
-
-## Plugin
-
-```bash
-mkdir -p <project>/.opencode/plugin
-cp plugin/opencode/metrics.js <project>/.opencode/plugin/metrics.js
-```
-
-Env:
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `AGENT_METRICS_PUSHGATEWAY` | — (required) | PushGateway URL |
-| `AGENT_METRICS_JOB` | `opencode` | job label |
-| `AGENT_METRICS_INSTANCE` | hostname | instance label |
-| `AGENT_METRICS_LABELS` | — | extra labels, `k=v,k2=v2` |
-
-Pushes `opencode_agent_tokens_total{kind}`, `opencode_agent_tool_calls_total{tool}`,
-`opencode_agent_context_max_tokens` after each tool call (throttled 15s) and on
-session idle. Errors never break the agent.
-
-## Stack
+## Repository layout
 
 ```text
-agent (plugin) ──▶ PushGateway ──vmagent──▶ VictoriaMetrics ──▶ Grafana
+├── integrations/            one folder per agent
+│   ├── opencode/            plugin.js (live counters) + run_timeline.py (report)
+│   └── claude-code/         push-metrics.mjs (live counters) + session_timeline.py (report)
+├── dashboards/              Grafana dashboard
+├── alerts/vmalert.yml       anomaly rules (token burst, slow feedback, runs without user)
+└── deploy/                  local monitoring stack in docker compose
 ```
 
-One-click local stack (Pushgateway + vmagent + VictoriaMetrics + Grafana with the
-dashboard provisioned):
+## Quick start
+
+1. Start the monitoring stack:
 
 ```bash
 cd deploy && docker compose up -d
-# Grafana:      http://localhost:3000  (dashboard "Agent run cost";
-#               pick the VictoriaMetrics datasource in the dropdown on first open)
-# Push target:  http://localhost:9091  → AGENT_METRICS_PUSHGATEWAY
 ```
 
-Already have your own Pushgateway/vmagent/VM? Import `dashboards/agent-run-cost.json`
-into Grafana and load `alerts/vmalert.yml` into vmalert.
+Grafana opens at http://localhost:3000. The "Agent run cost" dashboard is
+already loaded; on first open pick "VictoriaMetrics" in the datasource
+dropdown. Metrics are received on port 9091.
 
-## Metrics
+2. Connect your agent (next two sections).
 
-`agent_session_tokens_total`, `agent_session_cost_total`, `agent_session_turns`,
-`agent_session_edits_total`, `agent_session_tool_calls_total`,
-`agent_session_duration_seconds`, `agent_edit_to_gate_seconds{gate}` (analyzer),
-`opencode_agent_tokens_total{kind}`, `opencode_agent_tool_calls_total{tool}`,
-`opencode_agent_context_max_tokens` (plugin),
-`claude_code_agent_tokens_total{kind}`, `claude_code_agent_tool_calls_total{tool}`,
-`claude_code_agent_context_max_tokens`, `claude_code_agent_run_duration_seconds`
-(Claude Code adapter).
+## OpenCode
+
+Live counters: copy the plugin into the project, or into
+`~/.config/opencode/plugin/` to cover all projects:
+
+```bash
+mkdir -p <project>/.opencode/plugin
+cp integrations/opencode/plugin.js <project>/.opencode/plugin/metrics.js
+```
+
+Report for a finished session:
+
+```bash
+python3 integrations/opencode/run_timeline.py --list
+python3 integrations/opencode/run_timeline.py --session <id> \
+    --push-gateway http://localhost:9091 --label user=vasche
+```
+
+The report reads the local OpenCode database read-only and writes `run.md`
+plus `run.timeline.csv`. It can also answer "how much time passed between the
+code edit and the test result" (`--gate-regex`, `--watch`).
+
+## Claude Code
+
+Live counters: install the hook script and add hooks to settings, following
+[integrations/claude-code/README.md](integrations/claude-code/README.md):
+
+```bash
+mkdir -p ~/.claude/hooks/agent-metrics
+cp integrations/claude-code/push-metrics.mjs ~/.claude/hooks/agent-metrics/
+```
+
+Report for a finished session:
+
+```bash
+python3 integrations/claude-code/session_timeline.py --list
+python3 integrations/claude-code/session_timeline.py --session <id> \
+    --push-gateway http://localhost:9091 --label user=vasche
+```
+
+## Settings for the live counters
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AGENT_METRICS_PUSHGATEWAY` | required | PushGateway URL |
+| `AGENT_METRICS_JOB` | `opencode` / `claude-code` | job label |
+| `AGENT_METRICS_INSTANCE` | hostname | instance label |
+| `AGENT_METRICS_LABELS` | none | extra labels, `k=v,k2=v2` |
+| `AGENT_METRICS_TOKEN` | none | access token (Claude Code part) |
+
+The `user` label is filled on its own: the name is taken from
+`~/.harness/telemetry.json`, or from the OS username.
+
+## Metrics reference
+
+Live: `opencode_agent_tokens_total{kind}`, `opencode_agent_tool_calls_total{tool}`,
+`opencode_agent_context_max_tokens`; `claude_code_agent_tokens_total{kind}`,
+`claude_code_agent_tool_calls_total{tool}`, `claude_code_agent_context_max_tokens`,
+`claude_code_agent_run_duration_seconds`.
+
+Per-session summary (both report scripts): `agent_session_tokens_total`,
+`agent_session_cost_total`, `agent_session_turns`, `agent_session_edits_total`,
+`agent_session_tool_calls_total`, `agent_session_duration_seconds`,
+`agent_edit_to_gate_seconds{gate}`.
 
 ## License
 

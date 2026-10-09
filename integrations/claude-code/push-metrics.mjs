@@ -3,7 +3,7 @@
 //
 // Wired via Claude Code hooks (see settings.example.json): PostToolUse (throttled),
 // Stop (every turn end), SessionEnd (final push). Each invocation re-reads the whole
-// session transcript (JSONL) and pushes cumulative totals — stateless and crash-safe.
+// session transcript (JSONL) and pushes cumulative totals. Holds no state, safe on crashes.
 //
 // Env:
 //   AGENT_METRICS_PUSHGATEWAY  http://host:9091   (required)
