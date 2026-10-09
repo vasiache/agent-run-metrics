@@ -10,10 +10,11 @@ Supported agents: OpenCode and Claude Code. Others are planned.
 
 ```text
 ├── integrations/            one folder per agent
+│   ├── common/              shared report helpers (identity, PushGateway push)
 │   ├── opencode/            plugin.js (live counters) + run_timeline.py (report)
-│   └── claude-code/         push-metrics.mjs (live counters) + session_timeline.py (report)
+│   └── claude-code/         install.mjs + push-metrics.mjs + session_timeline.py
 ├── dashboards/              Grafana dashboard
-├── alerts/vmalert.yml       anomaly rules (token burst, slow feedback, runs without user)
+├── alerts/vmalert.yml       anomaly rules (token burst, slow feedback)
 └── deploy/                  local monitoring stack in docker compose
 ```
 
@@ -26,8 +27,8 @@ cd deploy && docker compose up -d
 ```
 
 Grafana opens at http://localhost:3000. The "Agent run cost" dashboard is
-already loaded; on first open pick "VictoriaMetrics" in the datasource
-dropdown. Metrics are received on port 9091.
+already loaded against the provisioned VictoriaMetrics datasource. Metrics are
+received on port 9091.
 
 2. Connect your agent (next two sections).
 
@@ -55,13 +56,21 @@ code edit and the test result" (`--gate-regex`, `--watch`).
 
 ## Claude Code
 
-Live counters: install the hook script and add hooks to settings, following
-[integrations/claude-code/README.md](integrations/claude-code/README.md):
+One command: it copies the hook script, adds the hooks and the gateway env to
+`~/.claude/settings.json` (idempotent, existing hooks are preserved), checks
+the pushgateway and runs a self-test:
 
 ```bash
-mkdir -p ~/.claude/hooks/agent-metrics
-cp integrations/claude-code/push-metrics.mjs ~/.claude/hooks/agent-metrics/
+node integrations/claude-code/install.mjs
+# or: node integrations/claude-code/install.mjs --push-gateway http://host:9091
+# undo: node integrations/claude-code/install.mjs --uninstall
 ```
+
+Manual install (fallback): copy
+[integrations/claude-code/push-metrics.mjs](integrations/claude-code/push-metrics.mjs)
+to `~/.claude/hooks/agent-metrics/` and merge
+[settings.example.json](integrations/claude-code/settings.example.json) into
+`~/.claude/settings.json`. Restart Claude Code (or open `/hooks`) afterwards.
 
 Report for a finished session:
 
@@ -77,6 +86,7 @@ python3 integrations/claude-code/session_timeline.py --session <id> \
 |---|---|---|
 | `AGENT_METRICS_PUSHGATEWAY` | required | PushGateway URL |
 | `AGENT_METRICS_JOB` | `opencode` / `claude-code` | job label |
+| `AGENT_METRICS_RUNTIME` | `opencode` / `claude-code` | runtime label on every series |
 | `AGENT_METRICS_INSTANCE` | hostname | instance label |
 | `AGENT_METRICS_LABELS` | none | extra labels, `k=v,k2=v2` |
 | `AGENT_METRICS_TOKEN` | none | access token (Claude Code part) |
@@ -86,15 +96,28 @@ The `user` label is filled on its own: the name is taken from
 
 ## Metrics reference
 
-Live: `opencode_agent_tokens_total{kind}`, `opencode_agent_tool_calls_total{tool}`,
-`opencode_agent_context_max_tokens`; `claude_code_agent_tokens_total{kind}`,
-`claude_code_agent_tool_calls_total{tool}`, `claude_code_agent_context_max_tokens`,
-`claude_code_agent_run_duration_seconds`.
+Both runtimes emit the same families; `runtime` (`opencode` / `claude-code`)
+tells them apart. Live: `agent_tokens_total{runtime,kind}`,
+`agent_tool_calls_total{runtime,tool}`, `agent_skill_calls_total{runtime,skill}`,
+`agent_plugin_calls_total{runtime,plugin}`, `agent_context_max_tokens{runtime}`,
+`agent_run_duration_seconds{runtime}`. Skills and plugins come from Skill tool
+calls in the Claude Code transcript (`plugin:skill` names feed the plugin
+family); every plugin is counted, including the metrics integration itself.
+
+Parallel sessions are separated, not merged: every live series also carries
+`session` (first 8 chars of the session id) and `project` (basename of the
+working directory, e.g. `agent-run-metrics`), so two concurrent runs on one
+host get their own grouping keys instead of overwriting each other. Session
+groups expire from the dashboard's "Active sessions" panel 5 minutes after
+their last push. Alerts aggregate over sessions (`sum by (instance, user)`).
 
 Per-session summary (both report scripts): `agent_session_tokens_total`,
-`agent_session_cost_total`, `agent_session_turns`, `agent_session_edits_total`,
-`agent_session_tool_calls_total`, `agent_session_duration_seconds`,
-`agent_edit_to_gate_seconds{gate}`.
+`agent_session_turns`, `agent_session_edits_total`,
+`agent_session_tool_calls_total`, `agent_session_duration_seconds`, all with a
+`runtime` label. `agent_session_cost_total` comes from OpenCode only (its DB
+tracks cost); Claude Code transcripts carry no pricing, so cost needs a pricing
+table first. The OpenCode analyzer emits `agent_edit_to_gate_seconds{gate}`
+when you pass `--gate-regex` and `--watch`.
 
 ## License
 

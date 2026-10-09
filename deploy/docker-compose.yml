@@ -1,8 +1,7 @@
 # Local metrics stack for agent-run-metrics.
 #
 #   docker compose up -d
-#   Grafana:  http://localhost:3000  (dashboards → "Agent run cost";
-#            on first open pick the VictoriaMetrics datasource in the dropdown)
+#   Grafana:  http://localhost:3000  (dashboard "Agent run cost", preloaded)
 #   Push:     http://localhost:9091  (use as AGENT_METRICS_PUSHGATEWAY)
 #   VM API:   http://localhost:8428
 #
@@ -13,7 +12,7 @@ services:
 
   victoria-metrics:
     image: victoriametrics/victoria-metrics:latest
-    command: ["-storageDataPath=/data", "-retentionPeriod=100y"]
+    command: ["-storageDataPath=/data", "-retentionPeriod=1y"]
     ports: ["127.0.0.1:8428:8428"]
     volumes: [vmdata:/data]
 

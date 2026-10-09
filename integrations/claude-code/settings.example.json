@@ -1,24 +1,27 @@
 {
+  "env": {
+    "AGENT_METRICS_PUSHGATEWAY": "http://localhost:9091"
+  },
   "hooks": {
     "PostToolUse": [
       {
         "matcher": "*",
         "hooks": [
-          { "type": "command", "command": "node ~/.claude/hooks/agent-metrics/push-metrics.mjs" }
+          { "type": "command", "command": "node ~/.claude/hooks/agent-metrics/push-metrics.mjs", "async": true, "timeout": 30 }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "node ~/.claude/hooks/agent-metrics/push-metrics.mjs" }
+          { "type": "command", "command": "node ~/.claude/hooks/agent-metrics/push-metrics.mjs", "async": true, "timeout": 30 }
         ]
       }
     ],
     "SessionEnd": [
       {
         "hooks": [
-          { "type": "command", "command": "node ~/.claude/hooks/agent-metrics/push-metrics.mjs" }
+          { "type": "command", "command": "node ~/.claude/hooks/agent-metrics/push-metrics.mjs", "async": true, "timeout": 30 }
         ]
       }
     ]

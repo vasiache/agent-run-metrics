@@ -7,7 +7,7 @@ groups:
     interval: 1m
     rules:
       - alert: AgentTokenBurst
-        expr: sum by (instance, user) (increase({__name__=~"(opencode|claude_code)_agent_tokens_total"}[30m])) > 5000000
+        expr: sum by (instance, user) (increase(agent_tokens_total[30m])) > 5000000
         for: 5m
         labels:
           severity: warning
@@ -23,15 +23,6 @@ groups:
         annotations:
           summary: "Edit-to-gate feedback over 30 min ({{ $labels.instance }})"
           description: "Gate feedback arrives when the edit context is already displaced, so the agent worked blind on that edit. An argument for fail-fast checks at the step level."
-
-      - alert: AgentRunWithoutIdentity
-        expr: '{__name__=~"(opencode|claude_code)_agent_tool_calls_total",user=""} > 0'
-        for: 10m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Tool calls without a user label on {{ $labels.instance }}"
-          description: "Realtime metrics arrive without identity: set AGENT_METRICS_LABELS=user=... (OpenCode plugin) or check that the Claude Code adapter can resolve the user."
 
 # NOTE: no rule for gate retries yet, because no component emits a retries counter.
 # Add one (e.g. agent_gate_retries_total from the analyzer) before alerting on it.

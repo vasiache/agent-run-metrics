@@ -2,10 +2,13 @@
   "title": "Agent run cost",
   "uid": "agent-run-cost",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 6,
   "editable": true,
   "refresh": "1m",
-  "time": { "from": "now-24h", "to": "now" },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
   "templating": {
     "list": [
       {
@@ -15,11 +18,79 @@
         "query": "prometheus"
       },
       {
-        "name": "instance",
-        "label": "Instance (host)",
+        "name": "runtime",
+        "label": "Runtime",
         "type": "query",
-        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-        "query": "label_values(opencode_agent_tokens_total, instance)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": "label_values(agent_tokens_total, runtime)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true
+      },
+      {
+        "name": "user",
+        "label": "User",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": "label_values(agent_tokens_total, user)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true
+      },
+      {
+        "name": "project",
+        "label": "Project",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": "label_values(agent_tokens_total, project)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true
+      },
+      {
+        "name": "tool",
+        "label": "Tool",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": "label_values(agent_tool_calls_total, tool)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true
+      },
+      {
+        "name": "skill",
+        "label": "Skill",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": "label_values(agent_skill_calls_total, skill)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true
+      },
+      {
+        "name": "plugin",
+        "label": "Plugin",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": "label_values(agent_plugin_calls_total, plugin)",
         "refresh": 2,
         "includeAll": true,
         "multi": true
@@ -31,88 +102,267 @@
       "id": 1,
       "type": "stat",
       "title": "Tokens total",
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
-      "targets": [{ "expr": "sum(agent_session_tokens_total{instance=~\"$instance\"})", "refId": "A" }]
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "sum(agent_tokens_total{runtime=~\"$runtime\",user=~\"$user\",project=~\"$project\"})",
+          "refId": "A"
+        }
+      ]
     },
     {
       "id": 2,
       "type": "stat",
       "title": "Cost total",
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
-      "targets": [{ "expr": "sum(agent_session_cost_total{instance=~\"$instance\"})", "refId": "A" }],
-      "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] }
+      "description": "Session cost from the report analyzers (OpenCode emits cost directly; Claude Code reports need a pricing table).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "sum(agent_session_cost_total{runtime=~\"$runtime\",user=~\"$user\",project=~\"$project\"})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      }
     },
     {
       "id": 3,
       "type": "stat",
       "title": "Context window max",
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
-      "targets": [{ "expr": "max(opencode_agent_context_max_tokens{instance=~\"$instance\"})", "refId": "A" }],
-      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "max(agent_context_max_tokens{runtime=~\"$runtime\",user=~\"$user\",project=~\"$project\"})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
     },
     {
       "id": 4,
       "type": "stat",
       "title": "Tool calls total",
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
-      "targets": [{ "expr": "sum(opencode_agent_tool_calls_total{instance=~\"$instance\"})", "refId": "A" }]
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "sum(agent_tool_calls_total{runtime=~\"$runtime\",user=~\"$user\",project=~\"$project\",tool=~\"$tool\"})",
+          "refId": "A"
+        }
+      ]
     },
     {
       "id": 5,
       "type": "timeseries",
       "title": "Tokens by kind",
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
-      "targets": [{
-        "expr": "sum by (kind) (rate(opencode_agent_tokens_total{instance=~\"$instance\"}[15m]))",
-        "legendFormat": "{{kind}}",
-        "refId": "A"
-      }],
-      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "targets": [
+        {
+          "expr": "sum by (runtime, kind) (rate(agent_tokens_total{runtime=~\"$runtime\",user=~\"$user\",project=~\"$project\"}[15m]))",
+          "legendFormat": "{{runtime}} · {{kind}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
     },
     {
       "id": 6,
       "type": "timeseries",
       "title": "Top tool calls",
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
-      "targets": [{
-        "expr": "topk(5, opencode_agent_tool_calls_total{instance=~\"$instance\"})",
-        "legendFormat": "{{tool}}",
-        "refId": "A"
-      }],
-      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "targets": [
+        {
+          "expr": "topk(5, agent_tool_calls_total{runtime=~\"$runtime\",user=~\"$user\",project=~\"$project\",tool=~\"$tool\"})",
+          "legendFormat": "{{runtime}} · {{tool}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
     },
     {
       "id": 7,
       "type": "timeseries",
       "title": "Edit → gate feedback (seconds)",
-      "description": "Время от правки, породившей дефект, до замечания гейта. Главная цифра аргумента за fail-fast проверки на шаге.",
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
-      "targets": [{
-        "expr": "agent_edit_to_gate_seconds{instance=~\"$instance\"}",
-        "legendFormat": "{{session}} {{gate}}",
-        "refId": "A"
-      }],
-      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+      "description": "Время от правки до замечания гейта на той же зоне. Чем короче, тем дешевле дефект.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "targets": [
+        {
+          "expr": "agent_edit_to_gate_seconds{project=~\"$project\"}",
+          "legendFormat": "{{session}} {{gate}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
     },
     {
       "id": 8,
       "type": "timeseries",
-      "title": "Gate retries",
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
-      "targets": [{
-        "expr": "topk(5, increase(opencode_agent_gate_retries_total{instance=~\"$instance\"}[1h]))",
-        "legendFormat": "{{gate}}",
-        "refId": "A"
-      }],
-      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+      "title": "Top skills",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "targets": [
+        {
+          "expr": "topk(5, agent_skill_calls_total{runtime=~\"$runtime\",user=~\"$user\",skill=~\"$skill\",project=~\"$project\"})",
+          "legendFormat": "{{runtime}} · {{skill}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Top plugins",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "targets": [
+        {
+          "expr": "topk(5, agent_plugin_calls_total{runtime=~\"$runtime\",user=~\"$user\",plugin=~\"$plugin\",project=~\"$project\"})",
+          "legendFormat": "{{runtime}} · {{plugin}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "Active sessions (5 min)",
+      "description": "Session groups pushed within the last 5 minutes (parallel sessions included).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 20
+      },
+      "targets": [
+        {
+          "expr": "count(push_time_seconds{} > (time() - 300))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
     }
   ]
 }

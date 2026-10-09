@@ -8,6 +8,9 @@ and whether the plan was written before the first source edit (--plan/--src).
 import argparse, csv, json, os, re, sqlite3, sys
 from datetime import datetime
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "common"))
+from agent_metrics import harness_identity, push_summary  # noqa: E402
+
 DEFAULT_DB = os.path.expanduser("~/.local/share/opencode/opencode.db")
 EDIT_TOOLS = {"edit", "write", "patch", "multiedit", "apply_patch"}
 
@@ -141,46 +144,12 @@ def main():
     ap.add_argument("--plan", help="plan file path substring")
     ap.add_argument("--src", help="source path substring")
     ap.add_argument("--out", default="run", help="output file prefix")
-    ap.add_argument("--push-gateway", help="PushGateway URL (http://host:9091) — push session summary as a batch job")
+    ap.add_argument("--push-gateway", help="PushGateway URL (http://host:9091), pushes the session summary")
     ap.add_argument("--label", action="append", default=[],
                     help="PushGateway label: key=value (user=vasche, task=BLK-15397, profile=test)")
-    ap.add_argument("--tenant", default="local", help="tenant label (cloud mode: from SaaS)")
+    ap.add_argument("--runtime", default="opencode", help="runtime label")
     ap.add_argument("--token", help="bearer token for cloud metrics endpoint (optional)")
     a = ap.parse_args()
-
-    def push_summary(res, sid):
-        """Push the session summary to PushGateway as a batch job. Raw POST, no deps."""
-        import urllib.request
-        extra = f',tenant="{a.tenant}"' + "".join(f',{k.split("=",1)[0]}="{k.split("=",1)[1]}"' for k in a.label if "=" in k)
-        base = f'session="{sid}"{extra}'
-        lines = [
-            "# TYPE agent_session_tokens_total gauge",
-            f"agent_session_tokens_total{{{base}}} {res.get('total_tokens', 0)}",
-            "# TYPE agent_session_cost_total gauge",
-            f"agent_session_cost_total{{{base}}} {res.get('total_cost', 0)}",
-            "# TYPE agent_session_turns gauge",
-            f"agent_session_turns{{{base}}} {res.get('turns', 0)}",
-            "# TYPE agent_session_edits_total gauge",
-            f"agent_session_edits_total{{{base}}} {res.get('edits', 0)}",
-            "# TYPE agent_session_tool_calls_total gauge",
-            f"agent_session_tool_calls_total{{{base}}} {res.get('tool_calls', 0)}",
-            "# TYPE agent_session_duration_seconds gauge",
-            f"agent_session_duration_seconds{{{base}}} {int(res.get('duration_min', 0) * 60)}",
-        ]
-        for g in res.get("gates", []):
-            if "min_edit_to_gate" in g:
-                lines.append(f'agent_edit_to_gate_seconds{{session="{sid}",gate="{g["time"]}"}} '
-                             f'{int(g["min_edit_to_gate"] * 60)}')
-        body = ("\n".join(lines) + "\n").encode()
-        import socket
-        url = (f"{a.push_gateway.rstrip('/')}/metrics/job/opencode_agent"
-               f"/instance/{socket.gethostname()}/session/{sid}")
-        headers = {"Content-Type": "text/plain"}
-        if a.token:
-            headers["Authorization"] = f"Bearer {a.token}"
-        urllib.request.urlopen(urllib.request.Request(url, data=body, method="POST",
-                                 headers=headers), timeout=30).read()
-        print(f"pushed -> {url}")
 
     db = connect(a.db)
     if a.list:
@@ -194,7 +163,8 @@ def main():
     res = analyze(ev, re.compile(a.watch, re.I) if a.watch else None, a.plan, a.src)
 
     if a.push_gateway:
-        push_summary(res, sid)
+        push_summary(res, sid, a.push_gateway, label=a.label, runtime=a.runtime, token=a.token,
+                     gates=res.get("gates", []))
 
     with open(f"{a.out}.timeline.csv", "w", newline="") as f:
         w = csv.writer(f)

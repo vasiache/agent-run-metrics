@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// push-metrics.mjs — realtime run metrics of a Claude Code session to PushGateway.
+// push-metrics.mjs: realtime run metrics of a Claude Code session to PushGateway.
 //
 // Wired via Claude Code hooks (see settings.example.json): PostToolUse (throttled),
 // Stop (every turn end), SessionEnd (final push). Each invocation re-reads the whole
@@ -8,6 +8,7 @@
 // Env:
 //   AGENT_METRICS_PUSHGATEWAY  http://host:9091   (required)
 //   AGENT_METRICS_JOB          job label, default "claude-code"
+//   AGENT_METRICS_RUNTIME      runtime label, default "claude-code"
 //   AGENT_METRICS_INSTANCE     instance label, default = hostname
 //   AGENT_METRICS_LABELS       extra labels "user=vasche,task=BLK-1"
 //   AGENT_METRICS_TOKEN        bearer token, sent as Authorization header
@@ -15,7 +16,7 @@
 //
 // Offline check:  node push-metrics.mjs --self-test <transcript.jsonl>
 
-import { readFile, stat, utimes, unlink } from "node:fs/promises";
+import { readFile, stat, writeFile, unlink } from "node:fs/promises";
 import os from "node:os";
 import { createInterface } from "node:readline";
 import { createReadStream } from "node:fs";
@@ -38,9 +39,37 @@ function usageKinds(u = {}) {
   return out;
 }
 
+// a Skill tool_use block -> { skill, plugin } counts (plugin = "id:name" prefix).
+// The metrics integration itself is counted too; self-monitoring is a feature.
+function skillOf(block) {
+  const skill = block.input?.skill;
+  if (!skill) return null;
+  const out = { skill };
+  const colon = skill.indexOf(":");
+  if (colon > 0) out.plugin = skill.slice(0, colon);
+  return out;
+}
+
+// project from the transcript slug: ~/.claude/projects/-home-<user>-projects-<name>/<sid>.jsonl.
+// Unknown slugs (tmp dirs, exotic homes) yield null and the label is omitted.
+function projectFromTranscript(p) {
+  const m = String(p).match(/\/\.claude\/projects\/([^/]+)\//);
+  if (!m) return null;
+  const slug = m[1];
+  const user = os.userInfo().username;
+  for (const pre of [`-home-${user}-projects-`, `-home-${user}-`,
+                     `-Users-${user}-projects-`, `-Users-${user}-`, `-root-`, `-tmp-`])
+    if (slug.startsWith(pre)) return slug.slice(pre.length) || null;
+  return null;
+}
+
 async function aggregate(transcriptPath) {
-  const acc = { tokens: {}, tools: {}, contextMax: 0, firstTs: null, lastTs: null };
+  const acc = { tokens: {}, tools: {}, skills: {}, plugins: {}, contextMax: 0, firstTs: null, lastTs: null };
+  // the transcript writes each content block as its own line, siblings sharing
+  // one message id: usage is identical across them (count once per id), while
+  // tool blocks must be deduped per block, not per message
   const seenMessages = new Set();
+  const seenBlocks = new Set();
   const rl = createInterface({ input: createReadStream(transcriptPath), crlfDelay: Infinity });
   for await (const line of rl) {
     if (!line.trim()) continue;
@@ -48,20 +77,31 @@ async function aggregate(transcriptPath) {
     try { e = JSON.parse(line); } catch { continue; } // tolerate malformed/truncated lines
     if (e?.type !== "assistant" || e?.isSidechain) continue;
     const msg = e.message || {};
-    if (msg.id && seenMessages.has(msg.id)) continue; // dedup retries
-    if (msg.id) seenMessages.add(msg.id);
-    for (const [kind, n] of Object.entries(usageKinds(msg.usage)))
-      acc.tokens[kind] = (acc.tokens[kind] || 0) + n;
-    const ctx = (msg.usage?.input_tokens || 0) + (msg.usage?.cache_read_input_tokens || 0) +
-      (msg.usage?.cache_creation_input_tokens || 0);
-    if (ctx > acc.contextMax) acc.contextMax = ctx;
+    const seen = msg.id && seenMessages.has(msg.id);
+    if (msg.id && !seen) seenMessages.add(msg.id);
+    if (!seen) {
+      for (const [kind, n] of Object.entries(usageKinds(msg.usage)))
+        acc.tokens[kind] = (acc.tokens[kind] || 0) + n;
+      const ctx = (msg.usage?.input_tokens || 0) + (msg.usage?.cache_read_input_tokens || 0) +
+        (msg.usage?.cache_creation_input_tokens || 0);
+      if (ctx > acc.contextMax) acc.contextMax = ctx;
+    }
     if (e.timestamp) {
       if (!acc.firstTs) acc.firstTs = e.timestamp;
       acc.lastTs = e.timestamp;
     }
-    for (const b of Array.isArray(msg.content) ? msg.content : [])
-      if (b?.type === "tool_use" && b.name)
-        acc.tools[b.name] = (acc.tools[b.name] || 0) + 1;
+    for (const b of Array.isArray(msg.content) ? msg.content : []) {
+      if (b?.type !== "tool_use" || !b.name) continue;
+      const bk = `${msg.id || ""}:${b.name}:${JSON.stringify(b.input ?? "")}`;
+      if (seenBlocks.has(bk)) continue; // dedup API retries of the same block
+      if (msg.id) seenBlocks.add(bk);
+      acc.tools[b.name] = (acc.tools[b.name] || 0) + 1;
+      const s = skillOf(b);
+      if (s) {
+        acc.skills[s.skill] = (acc.skills[s.skill] || 0) + 1;
+        if (s.plugin) acc.plugins[s.plugin] = (acc.plugins[s.plugin] || 0) + 1;
+      }
+    }
   }
   return acc;
 }
@@ -100,6 +140,7 @@ function extraLabels() {
 
 async function baseLabels() {
   const labels = await extraLabels();
+  if (!labels.runtime) labels.runtime = process.env.AGENT_METRICS_RUNTIME || "claude-code";
   if (!labels.user) {
     const u = (await harnessIdentity()) || os.userInfo().username;
     labels.user = u;
@@ -112,7 +153,7 @@ async function baseLabels() {
 }
 
 // ---------------------------------------------------------------------------
-// Rendering + push (same URL format as plugin/opencode/metrics.js)
+// Rendering + push
 // ---------------------------------------------------------------------------
 
 const esc = (s) => String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
@@ -128,26 +169,37 @@ function gatewayUrl(extra) {
 }
 
 function render(acc, labels) {
-  const ns = "claude_code_agent";
   const L = [];
   const labelStr = Object.entries(labels).map(([k, v]) => `${esc(k)}="${esc(v)}"`).join(",");
   const lb = labelStr ? `{${labelStr}}` : "";
   const tokens = Object.entries(acc.tokens);
   if (tokens.length) {
-    L.push(`# TYPE ${ns}_tokens_total counter`); // one TYPE line per metric family
+    L.push(`# TYPE agent_tokens_total counter`); // one TYPE line per metric family
     for (const [kind, v] of tokens)
-      L.push(`${ns}_tokens_total{${labelStr ? labelStr + "," : ""}kind="${esc(kind)}"} ${v}`);
+      L.push(`agent_tokens_total{${labelStr ? labelStr + "," : ""}kind="${esc(kind)}"} ${v}`);
   }
   const tools = Object.entries(acc.tools);
   if (tools.length) {
-    L.push(`# TYPE ${ns}_tool_calls_total counter`);
+    L.push(`# TYPE agent_tool_calls_total counter`);
     for (const [tool, v] of tools)
-      L.push(`${ns}_tool_calls_total{${labelStr ? labelStr + "," : ""}tool="${esc(tool)}"} ${v}`);
+      L.push(`agent_tool_calls_total{${labelStr ? labelStr + "," : ""}tool="${esc(tool)}"} ${v}`);
   }
-  L.push(`# TYPE ${ns}_context_max_tokens gauge`, `${ns}_context_max_tokens${lb} ${acc.contextMax}`);
+  const skills = Object.entries(acc.skills);
+  if (skills.length) {
+    L.push(`# TYPE agent_skill_calls_total counter`);
+    for (const [skill, v] of skills)
+      L.push(`agent_skill_calls_total{${labelStr ? labelStr + "," : ""}skill="${esc(skill)}"} ${v}`);
+  }
+  const plugins = Object.entries(acc.plugins);
+  if (plugins.length) {
+    L.push(`# TYPE agent_plugin_calls_total counter`);
+    for (const [plugin, v] of plugins)
+      L.push(`agent_plugin_calls_total{${labelStr ? labelStr + "," : ""}plugin="${esc(plugin)}"} ${v}`);
+  }
+  L.push(`# TYPE agent_context_max_tokens gauge`, `agent_context_max_tokens${lb} ${acc.contextMax}`);
   const dur = acc.firstTs && acc.lastTs
     ? Math.max(0, Math.round((Date.parse(acc.lastTs) - Date.parse(acc.firstTs)) / 1000)) : 0;
-  L.push(`# TYPE ${ns}_run_duration_seconds gauge`, `${ns}_run_duration_seconds${lb} ${dur}`);
+  L.push(`# TYPE agent_run_duration_seconds gauge`, `agent_run_duration_seconds${lb} ${dur}`);
   return L.join("\n") + "\n";
 }
 
@@ -181,8 +233,7 @@ async function throttled(sessionId) {
   let last = 0;
   try { last = (await stat(f)).mtimeMs; } catch { /* first push */ }
   if (Date.now() - last < PUSH_THROTTLE_MS) return true;
-  const now = new Date();
-  try { await utimes(f, now, now); } catch { /* state file best-effort */ }
+  try { await writeFile(f, ""); } catch { /* state file best-effort */ }
   return false;
 }
 
@@ -205,6 +256,11 @@ async function main() {
     : (process.argv[2] || input.transcript_path);
   if (!transcript) process.exit(0);
   const labels = await baseLabels();
+  // per-run identity: parallel sessions on one host must not share a grouping key
+  const sid = String(input.session_id || process.env.AGENT_METRICS_SESSION || "");
+  if (sid) labels.session = sid.slice(0, 8);
+  const project = projectFromTranscript(transcript);
+  if (project) labels.project = project;
   if (selfTest) {
     process.stdout.write(render(await aggregate(transcript), labels));
     return;

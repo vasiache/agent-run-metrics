@@ -1,1 +1,5 @@
-#gitgnore
+__pycache__/
+*.pyc
+run.md
+run.timeline.csv
+.
