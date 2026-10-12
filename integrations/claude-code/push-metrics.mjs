@@ -50,10 +50,11 @@ function skillOf(block) {
   return out;
 }
 
-// project from the transcript slug: ~/.claude/projects/-home-<user>-projects-<name>/<sid>.jsonl.
+// project from the transcript slug: ~/.claude/projects/-home-<user>-projects-<name>/<sid>.jsonl,
+// also CLAUDE_CONFIG_DIR profiles (~/.saas/profiles/<mode>/claude/projects/...).
 // Unknown slugs (tmp dirs, exotic homes) yield null and the label is omitted.
 function projectFromTranscript(p) {
-  const m = String(p).match(/\/\.claude\/projects\/([^/]+)\//);
+  const m = String(p).match(/\/(?:\.claude|profiles\/[^/]+\/claude)\/projects\/([^/]+)\//);
   if (!m) return null;
   const slug = m[1];
   const user = os.userInfo().username;

@@ -243,7 +243,7 @@
       },
       "targets": [
         {
-          "expr": "topk(5, agent_tool_calls_total{runtime=~\"$runtime\",user=~\"$user\",project=~\"$project\",tool=~\"$tool\"})",
+          "expr": "increase(topk(5, agent_tool_calls_total{runtime=~\"$runtime\",user=~\"$user\",project=~\"$project\",tool=~\"$tool\"}))",
           "legendFormat": "{{runtime}} · {{tool}}",
           "refId": "A"
         }
@@ -254,7 +254,7 @@
         },
         "overrides": []
       },
-      "description": "Five most-used tools, cumulative per session. Compare shapes between runtimes: a coding session is Edit-heavy, research is WebSearch/Read-heavy. Click a legend entry to isolate one series; use the Tool variable to exclude noise like Bash wrappers."
+      "description": "Growth of the five most-used tools over the selected range (increase of the per-session cumulative counters). Compare shapes between runtimes: a coding session is Edit-heavy, research is WebSearch/Read-heavy. Click a legend entry to isolate one series; use the Tool variable to exclude noise like Bash wrappers."
     },
     {
       "id": 7,
