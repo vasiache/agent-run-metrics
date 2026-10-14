@@ -15,7 +15,8 @@
 
 import os from "node:os";
 import path from "node:path";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
 
 const PUSH_THROTTLE_MS = 15000;
 
@@ -66,11 +67,11 @@ function tenantFromToken(token) {
   } catch { return null; }
 }
 
-function gatewayUrl(extraLabelsObj) {
+function gatewayUrl(extraLabelsObj, token) {
   let base = process.env.AGENT_METRICS_PUSHGATEWAY;
   if (!base) return null;
   if (base.includes("<tenant>")) {
-    const tenant = tenantFromToken(process.env.AGENT_METRICS_TOKEN || "");
+    const tenant = tenantFromToken(token || "");
     if (!tenant) {
       console.error("[agent-run-metrics] PUSHGATEWAY содержит <tenant>, но токен без клейма tenant_id — пуш пропущен");
       return null;
@@ -105,13 +106,48 @@ function render(labels) {
   return L.join("\n") + "\n";
 }
 
+// eharness native integration (ADR-020): no AGENT_METRICS_TOKEN env → resolve
+// the bearer from the grant store ~/.saas/token.json (0600): fresh access
+// token as-is, stale one → ONE silent refresh via the eharness CLI under a
+// mkdir lock (losers skip this push). No grant → no Authorization header.
+let tokenPromise = null;
+async function resolveToken() {
+  if (process.env.AGENT_METRICS_TOKEN) return process.env.AGENT_METRICS_TOKEN;
+  if (tokenPromise) return tokenPromise;
+  tokenPromise = (async () => {
+    const store = path.join(os.homedir(), ".saas", "token.json");
+    try {
+      const s = JSON.parse(await readFile(store, "utf8"));
+      if (s.access_token && s.expires_at && s.expires_at > Date.now() / 1000 + 30)
+        return s.access_token;
+    } catch { return null; } // no grant — standalone mode
+    const lock = store + ".refresh.lock";
+    try {
+      await mkdir(lock);
+    } catch { return null; } // another client is refreshing — skip
+    try {
+      return await new Promise((resolve) => {
+        execFile("eharness", ["auth", "token"], { timeout: 15000 },
+          (e, stdout) => resolve(e ? null : String(stdout).trim() || null));
+      });
+    } finally {
+      await rm(lock, { recursive: true, force: true }).catch(() => {});
+    }
+  })();
+  tokenPromise.catch(() => { tokenPromise = null; });
+  return tokenPromise;
+}
+
 async function push() {
   const labels = await baseLabels();
-  const url = gatewayUrl(labels);
+  const token = await resolveToken();
+  const url = gatewayUrl(labels, token);
   if (!url || state.pushing) return;
   state.pushing = true;
   try {
-    await fetch(url, { method: "POST", headers: { "Content-Type": "text/plain" }, body: render(labels) });
+    const headers = { "Content-Type": "text/plain" };
+    if (token) headers.Authorization = `Bearer ${token}`; // E-070: был потерян — cloud-push всегда 401
+    await fetch(url, { method: "POST", headers, body: render(labels) });
   } catch (e) {
     // monitoring must never break the agent
   } finally {

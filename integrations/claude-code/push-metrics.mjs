@@ -11,16 +11,55 @@
 //   AGENT_METRICS_RUNTIME      runtime label, default "claude-code"
 //   AGENT_METRICS_INSTANCE     instance label, default = hostname
 //   AGENT_METRICS_LABELS       extra labels "user=vasche,task=BLK-1"
-//   AGENT_METRICS_TOKEN        bearer token, sent as Authorization header
+//   AGENT_METRICS_TOKEN        bearer token, sent as Authorization header;
+//                              if unset — eharness grant ~/.saas/token.json
+//                              (fresh access, silent refresh via `eharness auth
+//                              token`); no grant → no Authorization header
 //   AGENT_METRICS_DEBUG        set to log push failures to stderr
 //
 // Offline check:  node push-metrics.mjs --self-test <transcript.jsonl>
 
-import { readFile, stat, writeFile, unlink } from "node:fs/promises";
+import { readFile, rm, stat, writeFile, unlink } from "node:fs/promises";
+import { execFile } from "node:child_process";
 import os from "node:os";
 import { createInterface } from "node:readline";
 import { createReadStream } from "node:fs";
 import path from "node:path";
+
+// ---------------------------------------------------------------------------
+// Token resolution
+// ---------------------------------------------------------------------------
+// AGENT_METRICS_TOKEN wins. Without it, eharness native integration (ADR-020):
+// read the grant store ~/.saas/token.json (0600); a fresh access token is used
+// as-is, a stale one triggers ONE silent refresh via the eharness CLI under a
+// mkdir lock (concurrent hooks: one refreshes, losers skip this push — the
+// next one finds a fresh token). No grant → null → push without Authorization
+// (standalone self-hosted gateway keeps working).
+
+async function resolveToken() {
+  if (process.env.AGENT_METRICS_TOKEN) return process.env.AGENT_METRICS_TOKEN;
+  const store = path.join(os.homedir(), ".saas", "token.json");
+  let stale = false;
+  try {
+    const s = JSON.parse(await readFile(store, "utf8"));
+    if (s.access_token && s.expires_at && s.expires_at > Date.now() / 1000 + 30)
+      return s.access_token;
+    stale = true;
+  } catch { return null; } // no grant — standalone mode
+  if (!stale) return null;
+  const lock = store + ".refresh.lock";
+  try {
+    await (await import("node:fs/promises")).mkdir(lock);
+  } catch { return null; } // another hook is refreshing — skip this push
+  try {
+    return await new Promise((resolve) => {
+      execFile("eharness", ["auth", "token"], { timeout: 15000 },
+        (e, stdout) => resolve(e ? null : String(stdout).trim() || null));
+    });
+  } finally {
+    await rm(lock, { recursive: true, force: true }).catch(() => {});
+  }
+}
 
 const PUSH_THROTTLE_MS = 15000;
 
@@ -159,12 +198,12 @@ async function baseLabels() {
 
 const esc = (s) => String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
 
-function gatewayUrl(extra) {
+function gatewayUrl(extra, token) {
   let base = process.env.AGENT_METRICS_PUSHGATEWAY;
   if (base && base.includes("<tenant>")) {
     let tenant = null;
     try {
-      const payload = JSON.parse(Buffer.from((process.env.AGENT_METRICS_TOKEN || "").split(".")[1], "base64url").toString("utf8"));
+      const payload = JSON.parse(Buffer.from((token || "").split(".")[1], "base64url").toString("utf8"));
       tenant = payload.tenant_id ? String(payload.tenant_id) : null;
     } catch { /* bad token */ }
     if (!tenant) {
@@ -217,11 +256,11 @@ function render(acc, labels) {
 }
 
 async function push(body, extraLabelsObj) {
-  const url = gatewayUrl(extraLabelsObj);
+  const token = await resolveToken();
+  const url = gatewayUrl(extraLabelsObj, token);
   if (!url) return;
   const headers = { "Content-Type": "text/plain" };
-  if (process.env.AGENT_METRICS_TOKEN)
-    headers.Authorization = `Bearer ${process.env.AGENT_METRICS_TOKEN}`;
+  if (token) headers.Authorization = `Bearer ${token}`;
   try {
     const res = await fetch(url, { method: "POST", headers, body,
                                    signal: AbortSignal.timeout(5000) });
