@@ -84,7 +84,7 @@ python3 integrations/claude-code/session_timeline.py --session <id> \
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AGENT_METRICS_PUSHGATEWAY` | required | PushGateway URL |
+| `AGENT_METRICS_PUSHGATEWAY` | required | PushGateway URL; плейсхолдер `<tenant>` подставляется из клейма `tenant_id` токена (например `https://host/push/<tenant>`) |
 | `AGENT_METRICS_JOB` | `opencode` / `claude-code` | job label |
 | `AGENT_METRICS_RUNTIME` | `opencode` / `claude-code` | runtime label on every series |
 | `AGENT_METRICS_INSTANCE` | hostname | instance label |

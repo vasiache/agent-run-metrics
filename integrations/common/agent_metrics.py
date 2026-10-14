@@ -29,6 +29,15 @@ def harness_identity():
         return None
 
 
+def _tenant_from_token(token: str | None) -> str | None:
+    import base64 as _b64, json as _json
+    try:
+        payload = _json.loads(_b64.urlsafe_b64decode((token or "").split(".")[1] + "=="))
+        return str(payload.get("tenant_id")) if payload.get("tenant_id") else None
+    except Exception:
+        return None
+
+
 def push_summary(res, sid, push_gateway, label=(), runtime="unknown", token=None,
                  gates=()):
     """POST the session summary to PushGateway. Print the URL, raise on failure."""
@@ -47,6 +56,12 @@ def push_summary(res, sid, push_gateway, label=(), runtime="unknown", token=None
         if "min_edit_to_gate" in g:
             lines.append(f'agent_edit_to_gate_seconds{{session="{esc(sid)}",gate="{esc(g["time"])}"}} '
                          f'{int(g["min_edit_to_gate"] * 60)}')
+    if "<tenant>" in push_gateway:
+        tenant = _tenant_from_token(token)
+        if not tenant:
+            print("[agent-run-metrics] PUSHGATEWAY содержит <tenant>, но токен без клейма tenant_id — пуш пропущен")
+            return None
+        push_gateway = push_gateway.replace("<tenant>", tenant)
     url = (f"{push_gateway.rstrip('/')}/metrics/job/agent"
            f"/instance/{socket.gethostname()}/session/{esc(sid)}")
     headers = {"Content-Type": "text/plain"}

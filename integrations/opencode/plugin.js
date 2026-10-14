@@ -2,7 +2,8 @@
 //
 // Install: <project>/.opencode/plugin/metrics.js (or ~/.config/opencode/plugin/)
 // Env:
-//   AGENT_METRICS_PUSHGATEWAY  http://host:9091   (required)
+//   AGENT_METRICS_PUSHGATEWAY  https://host[:port]/push/<tenant>   (required;
+//     "<tenant>" подставляется из клейма tenant_id вашего Bearer-токена)
 //   AGENT_METRICS_JOB          job label, default "opencode"
 //   AGENT_METRICS_RUNTIME      runtime label, default "opencode"
 //   AGENT_METRICS_INSTANCE     instance label, default = hostname
@@ -58,9 +59,24 @@ async function harnessIdentity() {
   return null;
 }
 
+function tenantFromToken(token) {
+  try {
+    const payload = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8"));
+    return payload.tenant_id ? String(payload.tenant_id) : null;
+  } catch { return null; }
+}
+
 function gatewayUrl(extraLabelsObj) {
-  const base = process.env.AGENT_METRICS_PUSHGATEWAY;
+  let base = process.env.AGENT_METRICS_PUSHGATEWAY;
   if (!base) return null;
+  if (base.includes("<tenant>")) {
+    const tenant = tenantFromToken(process.env.AGENT_METRICS_TOKEN || "");
+    if (!tenant) {
+      console.error("[agent-run-metrics] PUSHGATEWAY содержит <tenant>, но токен без клейма tenant_id — пуш пропущен");
+      return null;
+    }
+    base = base.replace("<tenant>", tenant);
+  }
   const job = encodeURIComponent(process.env.AGENT_METRICS_JOB || "opencode");
   const instance = encodeURIComponent(process.env.AGENT_METRICS_INSTANCE || os.hostname());
   const extraPath = Object.entries(extraLabelsObj)

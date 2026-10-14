@@ -160,7 +160,19 @@ async function baseLabels() {
 const esc = (s) => String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
 
 function gatewayUrl(extra) {
-  const base = process.env.AGENT_METRICS_PUSHGATEWAY;
+  let base = process.env.AGENT_METRICS_PUSHGATEWAY;
+  if (base && base.includes("<tenant>")) {
+    let tenant = null;
+    try {
+      const payload = JSON.parse(Buffer.from((process.env.AGENT_METRICS_TOKEN || "").split(".")[1], "base64url").toString("utf8"));
+      tenant = payload.tenant_id ? String(payload.tenant_id) : null;
+    } catch { /* bad token */ }
+    if (!tenant) {
+      console.error("[agent-run-metrics] PUSHGATEWAY содержит <tenant>, но токен без клейма tenant_id");
+      process.exit(2);
+    }
+    base = base.replace("<tenant>", tenant);
+  }
   if (!base) return null;
   const job = encodeURIComponent(process.env.AGENT_METRICS_JOB || "claude-code");
   const instance = encodeURIComponent(process.env.AGENT_METRICS_INSTANCE || os.hostname());
