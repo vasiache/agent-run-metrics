@@ -61,8 +61,16 @@ Identity and scope labels are filled automatically:
 Tokens by kind (`input`, `output`, `reasoning`, `cache_read`, `cache_write`),
 tool calls by tool name, skill calls (the `Skill` tool) and plugin calls (the
 `plugin:skill` prefix; every plugin is counted, including this integration),
-the largest context window, session duration. Sub-agent (sidechain) work is
-excluded. A retried assistant message is counted once, not twice.
+the largest context window, session duration. A retried assistant message is
+counted once, not twice.
+
+Subagent runs are counted under their own families, labeled with the agent
+type from the run's `meta.json` (`agent_subagent_spawns_total`,
+`agent_subagent_tokens_total`, `agent_subagent_tool_calls_total`,
+`agent_subagent_context_max_tokens`, `agent_subagent_duration_seconds`).
+The hook picks them up from `<session-id>/subagents/agent-*.jsonl` next to
+the main transcript; runs of the same agent type merge into one series, and
+the parent-session counters do not include them.
 
 ## Offline check
 
@@ -83,4 +91,5 @@ python3 session_timeline.py --session <id> \
 Writes `run.md` and `run.timeline.csv` next to the current directory and sends
 the session summary (tokens, turns, tool calls, edits, duration) to
 PushGateway. Access token comes from `--token` or `AGENT_METRICS_TOKEN`.
-Skills and plugins used in the session are listed in the report.
+Skills, plugins and subagent runs (name, description, tokens, tool calls,
+duration) are listed in the report.

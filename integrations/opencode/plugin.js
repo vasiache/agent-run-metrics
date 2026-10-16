@@ -3,7 +3,7 @@
 // Install: <project>/.opencode/plugin/metrics.js (or ~/.config/opencode/plugin/)
 // Env:
 //   AGENT_METRICS_PUSHGATEWAY  https://host[:port]/push/<tenant>   (required;
-//     "<tenant>" подставляется из клейма tenant_id вашего Bearer-токена)
+//     "<tenant>" is replaced with the tenant_id claim of your bearer token)
 //   AGENT_METRICS_JOB          job label, default "opencode"
 //   AGENT_METRICS_RUNTIME      runtime label, default "opencode"
 //   AGENT_METRICS_INSTANCE     instance label, default = hostname
@@ -73,7 +73,7 @@ function gatewayUrl(extraLabelsObj, token) {
   if (base.includes("<tenant>")) {
     const tenant = tenantFromToken(token || "");
     if (!tenant) {
-      console.error("[agent-run-metrics] PUSHGATEWAY содержит <tenant>, но токен без клейма tenant_id — пуш пропущен");
+      console.error("[agent-run-metrics] PUSHGATEWAY has <tenant> but the token has no tenant_id claim, push skipped");
       return null;
     }
     base = base.replace("<tenant>", tenant);
@@ -146,7 +146,7 @@ async function push() {
   state.pushing = true;
   try {
     const headers = { "Content-Type": "text/plain" };
-    if (token) headers.Authorization = `Bearer ${token}`; // E-070: был потерян — cloud-push всегда 401
+    if (token) headers.Authorization = `Bearer ${token}`; // E-070: this line used to go missing, cloud pushes came back 401
     await fetch(url, { method: "POST", headers, body: render(labels) });
   } catch (e) {
     // monitoring must never break the agent

@@ -238,7 +238,7 @@ function gatewayUrl(extra, token) {
       tenant = payload.tenant_id ? String(payload.tenant_id) : null;
     } catch { /* bad token */ }
     if (!tenant) {
-      console.error("[agent-run-metrics] PUSHGATEWAY содержит <tenant>, но токен без клейма tenant_id");
+      console.error("[agent-run-metrics] PUSHGATEWAY has <tenant> but the token has no tenant_id claim");
       process.exit(2);
     }
     base = base.replace("<tenant>", tenant);
@@ -289,28 +289,38 @@ function render(acc, labels, subagents = []) {
   const dur = acc.firstTs && acc.lastTs
     ? Math.max(0, Math.round((Date.parse(acc.lastTs) - Date.parse(acc.firstTs)) / 1000)) : 0;
   L.push(`# TYPE agent_run_duration_seconds gauge`, `agent_run_duration_seconds${lb} ${dur}`);
+  // one TYPE line per family (Prometheus text format); runs of the same agent
+  // type share one label set, so merge them (sum counters, max context,
+  // duration = union of the time ranges)
+  const merged = new Map();
   for (const sub of subagents) {
-    const agentLbl = `${labelStr ? labelStr + "," : ""}agent="${esc(sub.agent)}"`;
-    const subTokens = Object.entries(sub.acc.tokens);
-    if (subTokens.length) {
-      L.push(`# TYPE agent_subagent_tokens_total counter`);
-      for (const [kind, v] of subTokens)
-        L.push(`agent_subagent_tokens_total{${agentLbl},kind="${esc(kind)}"} ${v}`);
-    }
-    const subTools = Object.entries(sub.acc.tools);
-    if (subTools.length) {
-      L.push(`# TYPE agent_subagent_tool_calls_total counter`);
-      for (const [tool, v] of subTools)
-        L.push(`agent_subagent_tool_calls_total{${agentLbl},tool="${esc(tool)}"} ${v}`);
-    }
-    if (sub.acc.contextMax)
-      L.push(`# TYPE agent_subagent_context_max_tokens gauge`,
-             `agent_subagent_context_max_tokens{${agentLbl}} ${sub.acc.contextMax}`);
-    const sdur = sub.acc.firstTs && sub.acc.lastTs
-      ? Math.max(0, Math.round((Date.parse(sub.acc.lastTs) - Date.parse(sub.acc.firstTs)) / 1000)) : 0;
-    L.push(`# TYPE agent_subagent_duration_seconds gauge`,
-           `agent_subagent_duration_seconds{${agentLbl}} ${sdur}`);
+    const m = merged.get(sub.agent) || { acc: { tokens: {}, tools: {}, contextMax: 0, firstTs: null, lastTs: null } };
+    for (const [k, v] of Object.entries(sub.acc.tokens))
+      m.acc.tokens[k] = (m.acc.tokens[k] || 0) + v;
+    for (const [t, v] of Object.entries(sub.acc.tools))
+      m.acc.tools[t] = (m.acc.tools[t] || 0) + v;
+    m.acc.contextMax = Math.max(m.acc.contextMax, sub.acc.contextMax);
+    if (sub.acc.firstTs && (!m.acc.firstTs || sub.acc.firstTs < m.acc.firstTs)) m.acc.firstTs = sub.acc.firstTs;
+    if (sub.acc.lastTs && (!m.acc.lastTs || sub.acc.lastTs > m.acc.lastTs)) m.acc.lastTs = sub.acc.lastTs;
+    merged.set(sub.agent, m);
   }
+  const tokLines = [], toolLines = [], ctxLines = [], durLines = [];
+  for (const [agent, m] of merged) {
+    const agentLbl = `${labelStr ? labelStr + "," : ""}agent="${esc(agent)}"`;
+    for (const [kind, v] of Object.entries(m.acc.tokens))
+      tokLines.push(`agent_subagent_tokens_total{${agentLbl},kind="${esc(kind)}"} ${v}`);
+    for (const [tool, v] of Object.entries(m.acc.tools))
+      toolLines.push(`agent_subagent_tool_calls_total{${agentLbl},tool="${esc(tool)}"} ${v}`);
+    if (m.acc.contextMax)
+      ctxLines.push(`agent_subagent_context_max_tokens{${agentLbl}} ${m.acc.contextMax}`);
+    const sdur = m.acc.firstTs && m.acc.lastTs
+      ? Math.max(0, Math.round((Date.parse(m.acc.lastTs) - Date.parse(m.acc.firstTs)) / 1000)) : 0;
+    durLines.push(`agent_subagent_duration_seconds{${agentLbl}} ${sdur}`);
+  }
+  if (tokLines.length) L.push(`# TYPE agent_subagent_tokens_total counter`, ...tokLines);
+  if (toolLines.length) L.push(`# TYPE agent_subagent_tool_calls_total counter`, ...toolLines);
+  if (ctxLines.length) L.push(`# TYPE agent_subagent_context_max_tokens gauge`, ...ctxLines);
+  if (durLines.length) L.push(`# TYPE agent_subagent_duration_seconds gauge`, ...durLines);
   return L.join("\n") + "\n";
 }
 

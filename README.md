@@ -84,7 +84,7 @@ python3 integrations/claude-code/session_timeline.py --session <id> \
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AGENT_METRICS_PUSHGATEWAY` | required | PushGateway URL; плейсхолдер `<tenant>` подставляется из клейма `tenant_id` токена (например `https://host/push/<tenant>`) |
+| `AGENT_METRICS_PUSHGATEWAY` | required | PushGateway URL; the `<tenant>` placeholder is replaced with the `tenant_id` claim of the token, e.g. `https://host/push/<tenant>` |
 | `AGENT_METRICS_JOB` | `opencode` / `claude-code` | job label |
 | `AGENT_METRICS_RUNTIME` | `opencode` / `claude-code` | runtime label on every series |
 | `AGENT_METRICS_INSTANCE` | hostname | instance label |
@@ -104,12 +104,23 @@ tells them apart. Live: `agent_tokens_total{runtime,kind}`,
 calls in the Claude Code transcript (`plugin:skill` names feed the plugin
 family); every plugin is counted, including the metrics integration itself.
 
+Subagent runs (Claude Code) are counted separately, per agent type
+(`Explore`, `Plan`, ...): `agent_subagent_spawns_total{agent}`,
+`agent_subagent_tokens_total{agent,kind}`,
+`agent_subagent_tool_calls_total{agent,tool}`,
+`agent_subagent_context_max_tokens{agent}`,
+`agent_subagent_duration_seconds{agent}`. The hook reads them from
+`<session>/subagents/` transcript files next to the main transcript; runs of
+the same agent type merge into one series. The main-session series do not
+include subagent work, so a session's full spend is main + subagent series.
+
 Parallel sessions are separated, not merged: every live series also carries
 `session` (first 8 chars of the session id) and `project` (basename of the
 working directory, e.g. `agent-run-metrics`), so two concurrent runs on one
-host get their own grouping keys instead of overwriting each other. Session
-groups expire from the dashboard's "Active sessions" panel 5 minutes after
-their last push. Alerts aggregate over sessions (`sum by (instance, user)`).
+host get their own grouping keys instead of overwriting each other. Subagent
+series carry the parent session's `session` label. Session groups expire from
+the dashboard's "Active sessions" panel 5 minutes after their last push.
+Alerts aggregate over sessions (`sum by (instance, user)`).
 
 Per-session summary (both report scripts): `agent_session_tokens_total`,
 `agent_session_turns`, `agent_session_edits_total`,
