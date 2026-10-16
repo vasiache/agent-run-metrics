@@ -62,6 +62,8 @@ async function resolveToken() {
 }
 
 const PUSH_THROTTLE_MS = 15000;
+// matches the edit vocabulary of session_timeline.py
+const EDIT_TOOLS = new Set(["Edit", "Write", "NotebookEdit"]);
 
 // ---------------------------------------------------------------------------
 // Metrics aggregation over the transcript
@@ -110,7 +112,8 @@ function projectFromTranscript(p) {
 }
 
 async function aggregate(transcriptPath) {
-  const acc = { tokens: {}, tools: {}, skills: {}, plugins: {}, spawns: {}, contextMax: 0, firstTs: null, lastTs: null };
+  const acc = { tokens: {}, tools: {}, skills: {}, plugins: {}, spawns: {}, edits: 0, turns: 0,
+                contextMax: 0, firstTs: null, lastTs: null };
   // the transcript writes each content block as its own line, siblings sharing
   // one message id: usage is identical across them (count once per id), while
   // tool blocks must be deduped per block, not per message
@@ -124,7 +127,7 @@ async function aggregate(transcriptPath) {
     if (e?.type !== "assistant") continue;
     const msg = e.message || {};
     const seen = msg.id && seenMessages.has(msg.id);
-    if (msg.id && !seen) seenMessages.add(msg.id);
+    if (msg.id && !seen) { seenMessages.add(msg.id); acc.turns++; }
     if (!seen) {
       for (const [kind, n] of Object.entries(usageKinds(msg.usage)))
         acc.tokens[kind] = (acc.tokens[kind] || 0) + n;
@@ -142,6 +145,7 @@ async function aggregate(transcriptPath) {
       if (seenBlocks.has(bk)) continue; // dedup API retries of the same block
       if (msg.id) seenBlocks.add(bk);
       acc.tools[b.name] = (acc.tools[b.name] || 0) + 1;
+      if (EDIT_TOOLS.has(b.name)) acc.edits++;
       const st = spawnTypeOf(b);
       if (st) acc.spawns[st] = (acc.spawns[st] || 0) + 1;
       const s = skillOf(b);
@@ -286,6 +290,17 @@ function render(acc, labels, subagents = []) {
       L.push(`agent_subagent_spawns_total{${labelStr ? labelStr + "," : ""}agent="${esc(agent)}"} ${v}`);
   }
   L.push(`# TYPE agent_context_max_tokens gauge`, `agent_context_max_tokens${lb} ${acc.contextMax}`);
+  // session summary, same family names as the report scripts (agent_metrics.py),
+  // so the dashboard's session stat panels fill from the live hook too
+  const sessDur = acc.firstTs && acc.lastTs
+    ? Math.max(0, Math.round((Date.parse(acc.lastTs) - Date.parse(acc.firstTs)) / 1000)) : 0;
+  L.push(`# TYPE agent_session_tokens_total gauge`,
+         `agent_session_tokens_total${lb} ${Object.values(acc.tokens).reduce((a, v) => a + v, 0)}`);
+  L.push(`# TYPE agent_session_turns gauge`, `agent_session_turns${lb} ${acc.turns}`);
+  L.push(`# TYPE agent_session_edits_total gauge`, `agent_session_edits_total${lb} ${acc.edits}`);
+  L.push(`# TYPE agent_session_tool_calls_total gauge`,
+         `agent_session_tool_calls_total${lb} ${Object.values(acc.tools).reduce((a, v) => a + v, 0)}`);
+  L.push(`# TYPE agent_session_duration_seconds gauge`, `agent_session_duration_seconds${lb} ${sessDur}`);
   const dur = acc.firstTs && acc.lastTs
     ? Math.max(0, Math.round((Date.parse(acc.lastTs) - Date.parse(acc.firstTs)) / 1000)) : 0;
   L.push(`# TYPE agent_run_duration_seconds gauge`, `agent_run_duration_seconds${lb} ${dur}`);
