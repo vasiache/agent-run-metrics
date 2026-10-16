@@ -2,7 +2,7 @@
   "title": "Agent run cost",
   "uid": "agent-run-cost",
   "schemaVersion": 39,
-  "version": 7,
+  "version": 8,
   "editable": true,
   "refresh": "1m",
   "time": {
@@ -94,6 +94,19 @@
         "refresh": 2,
         "includeAll": true,
         "multi": true
+      },
+      {
+        "name": "session",
+        "label": "Session",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": "label_values(agent_tokens_total, session)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true
       }
     ]
   },
@@ -114,7 +127,7 @@
       },
       "targets": [
         {
-          "expr": "sum(agent_tokens_total{runtime=~\"$runtime\",user=~\"$user\",project=~\"$project\"})",
+          "expr": "sum(agent_tokens_total{runtime=~\"$runtime\",user=~\"$user\",project=~\"$project\"}[$__interval])",
           "refId": "A"
         }
       ],
@@ -137,7 +150,7 @@
       },
       "targets": [
         {
-          "expr": "sum(agent_session_cost_total{runtime=~\"$runtime\",user=~\"$user\",project=~\"$project\"})",
+          "expr": "sum(agent_session_cost_total{runtime=~\"$runtime\",user=~\"$user\",project=~\"$project\"}[$__interval])",
           "refId": "A"
         }
       ],
@@ -164,7 +177,7 @@
       },
       "targets": [
         {
-          "expr": "max(agent_context_max_tokens{runtime=~\"$runtime\",user=~\"$user\",project=~\"$project\"})",
+          "expr": "max(agent_context_max_tokens{runtime=~\"$runtime\",user=~\"$user\",project=~\"$project\"}[$__interval])",
           "refId": "A"
         }
       ],
@@ -192,7 +205,7 @@
       },
       "targets": [
         {
-          "expr": "sum(agent_tool_calls_total{runtime=~\"$runtime\",user=~\"$user\",project=~\"$project\",tool=~\"$tool\"})",
+          "expr": "sum(agent_tool_calls_total{runtime=~\"$runtime\",user=~\"$user\",project=~\"$project\",tool=~\"$tool\"}[$__interval])",
           "refId": "A"
         }
       ],
@@ -259,7 +272,7 @@
     {
       "id": 7,
       "type": "timeseries",
-      "title": "Edit → gate feedback (seconds)",
+      "title": "gate feedback (seconds)",
       "description": "Seconds between a source edit and the gate feedback that caught a problem in the same area (from run_timeline.py --gate-regex with a --watch pattern). Short is good: the agent still holds the edit context and fixes it cheaply. Past ~30 minutes the context is gone, which is what the AgentDefectFeedbackSlow alert fires on. Empty when no gate analysis was pushed.",
       "datasource": {
         "type": "prometheus",
@@ -288,7 +301,7 @@
     {
       "id": 8,
       "type": "timeseries",
-      "title": "Top skills",
+      "title": "Top skills call",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -301,7 +314,7 @@
       },
       "targets": [
         {
-          "expr": "topk(5, agent_skill_calls_total{runtime=~\"$runtime\",user=~\"$user\",skill=~\"$skill\",project=~\"$project\"})",
+          "expr": "increase(topk(5, agent_skill_calls_total{runtime=~\"$runtime\",user=~\"$user\",project=~\"$project\",skill=~\"$skill\"}[$__interval]))",
           "legendFormat": "{{runtime}} · {{skill}}",
           "refId": "A"
         }
@@ -317,7 +330,7 @@
     {
       "id": 9,
       "type": "timeseries",
-      "title": "Top plugins",
+      "title": "Top Plugins call",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -330,7 +343,7 @@
       },
       "targets": [
         {
-          "expr": "topk(5, agent_plugin_calls_total{runtime=~\"$runtime\",user=~\"$user\",plugin=~\"$plugin\",project=~\"$project\"})",
+          "expr": "increase(topk(5, agent_plugin_calls_total{runtime=~\"$runtime\",user=~\"$user\",project=~\"$project\",plugin=~\"$plugin\"}[$__interval]))",
           "legendFormat": "{{runtime}} · {{plugin}}",
           "refId": "A"
         }
@@ -369,6 +382,109 @@
           "unit": "short"
         },
         "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Sessions over period (main vs subagents)",
+      "description": "Token spend per session over the selected period. Subagent runs carry the parent session label, so each session's total already includes its subagents (separate series).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "main {{session}}",
+          "expr": "sum by (session) (increase(agent_tokens_total{runtime=~\"$runtime\",user=~\"$user\",project=~\"$project\",session=~\"$session\"}[$__interval]))"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "sub {{session}}",
+          "expr": "sum by (session) (increase(agent_subagent_tokens_total{runtime=~\"$runtime\",user=~\"$user\",project=~\"$project\",session=~\"$session\"}[$__interval]))"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Subagent tokens by agent",
+      "description": "Token spend of subagent runs grouped by agent type (Explore, Plan, ...). Aggregated per agent name in the hook, so parallel runs of one type merge into one series.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{agent}}",
+          "expr": "sum by (agent) (increase(agent_subagent_tokens_total{runtime=~\"$runtime\",user=~\"$user\",project=~\"$project\"}[$__interval]))"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "fillOpacity": 8,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       }
     }
   ]

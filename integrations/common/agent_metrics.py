@@ -59,7 +59,7 @@ def push_summary(res, sid, push_gateway, label=(), runtime="unknown", token=None
     if "<tenant>" in push_gateway:
         tenant = _tenant_from_token(token)
         if not tenant:
-            print("[agent-run-metrics] PUSHGATEWAY содержит <tenant>, но токен без клейма tenant_id — пуш пропущен")
+            print("[agent-run-metrics] PUSHGATEWAY has <tenant> but the token has no tenant_id claim, push skipped")
             return None
         push_gateway = push_gateway.replace("<tenant>", tenant)
     url = (f"{push_gateway.rstrip('/')}/metrics/job/agent"

@@ -19,7 +19,7 @@
 //
 // Offline check:  node push-metrics.mjs --self-test <transcript.jsonl>
 
-import { readFile, rm, stat, writeFile, unlink } from "node:fs/promises";
+import { readFile, readdir, rm, stat, writeFile, unlink } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import os from "node:os";
 import { createInterface } from "node:readline";
@@ -62,6 +62,8 @@ async function resolveToken() {
 }
 
 const PUSH_THROTTLE_MS = 15000;
+// matches the edit vocabulary of session_timeline.py
+const EDIT_TOOLS = new Set(["Edit", "Write", "NotebookEdit"]);
 
 // ---------------------------------------------------------------------------
 // Metrics aggregation over the transcript
@@ -89,6 +91,12 @@ function skillOf(block) {
   return out;
 }
 
+// an Agent/Task tool_use block -> subagent type (the agent's name, e.g. "Explore")
+function spawnTypeOf(block) {
+  if (block.name !== "Task" && block.name !== "Agent") return null;
+  return String(block.input?.subagent_type || block.input?.name || "unknown");
+}
+
 // project from the transcript slug: ~/.claude/projects/-home-<user>-projects-<name>/<sid>.jsonl,
 // also CLAUDE_CONFIG_DIR profiles (~/.saas/profiles/<mode>/claude/projects/...).
 // Unknown slugs (tmp dirs, exotic homes) yield null and the label is omitted.
@@ -104,7 +112,8 @@ function projectFromTranscript(p) {
 }
 
 async function aggregate(transcriptPath) {
-  const acc = { tokens: {}, tools: {}, skills: {}, plugins: {}, contextMax: 0, firstTs: null, lastTs: null };
+  const acc = { tokens: {}, tools: {}, skills: {}, plugins: {}, spawns: {}, edits: 0, turns: 0,
+                contextMax: 0, firstTs: null, lastTs: null };
   // the transcript writes each content block as its own line, siblings sharing
   // one message id: usage is identical across them (count once per id), while
   // tool blocks must be deduped per block, not per message
@@ -115,10 +124,10 @@ async function aggregate(transcriptPath) {
     if (!line.trim()) continue;
     let e;
     try { e = JSON.parse(line); } catch { continue; } // tolerate malformed/truncated lines
-    if (e?.type !== "assistant" || e?.isSidechain) continue;
+    if (e?.type !== "assistant") continue;
     const msg = e.message || {};
     const seen = msg.id && seenMessages.has(msg.id);
-    if (msg.id && !seen) seenMessages.add(msg.id);
+    if (msg.id && !seen) { seenMessages.add(msg.id); acc.turns++; }
     if (!seen) {
       for (const [kind, n] of Object.entries(usageKinds(msg.usage)))
         acc.tokens[kind] = (acc.tokens[kind] || 0) + n;
@@ -136,6 +145,9 @@ async function aggregate(transcriptPath) {
       if (seenBlocks.has(bk)) continue; // dedup API retries of the same block
       if (msg.id) seenBlocks.add(bk);
       acc.tools[b.name] = (acc.tools[b.name] || 0) + 1;
+      if (EDIT_TOOLS.has(b.name)) acc.edits++;
+      const st = spawnTypeOf(b);
+      if (st) acc.spawns[st] = (acc.spawns[st] || 0) + 1;
       const s = skillOf(b);
       if (s) {
         acc.skills[s.skill] = (acc.skills[s.skill] || 0) + 1;
@@ -144,6 +156,29 @@ async function aggregate(transcriptPath) {
     }
   }
   return acc;
+}
+
+// Subagent runs of the session: <project>/<sid>/subagents/agent-<id>.jsonl
+// with a sibling .meta.json holding the agent's name (agentType).
+// Returns [{ agent, description, acc }].
+async function aggregateSubagents(transcriptPath) {
+  const sid = path.basename(transcriptPath).replace(/\.jsonl$/, "");
+  const dir = path.join(path.dirname(transcriptPath), sid, "subagents");
+  let files;
+  try { files = (await readdir(dir)).filter((f) => /^agent-.*\.jsonl$/.test(f)).sort(); }
+  catch { return []; } // no subagents dir — session spawned none
+  const out = [];
+  for (const f of files) {
+    let agent = "unknown";
+    let description = null;
+    try {
+      const meta = JSON.parse(await readFile(path.join(dir, f.replace(/\.jsonl$/, ".meta.json")), "utf8"));
+      if (meta.agentType) agent = String(meta.agentType);
+      if (meta.description) description = String(meta.description);
+    } catch { /* unnamed agent */ }
+    out.push({ agent, description, acc: await aggregate(path.join(dir, f)) });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -207,7 +242,7 @@ function gatewayUrl(extra, token) {
       tenant = payload.tenant_id ? String(payload.tenant_id) : null;
     } catch { /* bad token */ }
     if (!tenant) {
-      console.error("[agent-run-metrics] PUSHGATEWAY содержит <tenant>, но токен без клейма tenant_id");
+      console.error("[agent-run-metrics] PUSHGATEWAY has <tenant> but the token has no tenant_id claim");
       process.exit(2);
     }
     base = base.replace("<tenant>", tenant);
@@ -220,7 +255,7 @@ function gatewayUrl(extra, token) {
   return `${base.replace(/\/+$/, "")}/metrics/job/${job}/instance/${instance}${extraPath}`;
 }
 
-function render(acc, labels) {
+function render(acc, labels, subagents = []) {
   const L = [];
   const labelStr = Object.entries(labels).map(([k, v]) => `${esc(k)}="${esc(v)}"`).join(",");
   const lb = labelStr ? `{${labelStr}}` : "";
@@ -248,10 +283,59 @@ function render(acc, labels) {
     for (const [plugin, v] of plugins)
       L.push(`agent_plugin_calls_total{${labelStr ? labelStr + "," : ""}plugin="${esc(plugin)}"} ${v}`);
   }
+  const spawns = Object.entries(acc.spawns || {});
+  if (spawns.length) {
+    L.push(`# TYPE agent_subagent_spawns_total counter`);
+    for (const [agent, v] of spawns)
+      L.push(`agent_subagent_spawns_total{${labelStr ? labelStr + "," : ""}agent="${esc(agent)}"} ${v}`);
+  }
   L.push(`# TYPE agent_context_max_tokens gauge`, `agent_context_max_tokens${lb} ${acc.contextMax}`);
+  // session summary, same family names as the report scripts (agent_metrics.py),
+  // so the dashboard's session stat panels fill from the live hook too
+  const sessDur = acc.firstTs && acc.lastTs
+    ? Math.max(0, Math.round((Date.parse(acc.lastTs) - Date.parse(acc.firstTs)) / 1000)) : 0;
+  L.push(`# TYPE agent_session_tokens_total gauge`,
+         `agent_session_tokens_total${lb} ${Object.values(acc.tokens).reduce((a, v) => a + v, 0)}`);
+  L.push(`# TYPE agent_session_turns gauge`, `agent_session_turns${lb} ${acc.turns}`);
+  L.push(`# TYPE agent_session_edits_total gauge`, `agent_session_edits_total${lb} ${acc.edits}`);
+  L.push(`# TYPE agent_session_tool_calls_total gauge`,
+         `agent_session_tool_calls_total${lb} ${Object.values(acc.tools).reduce((a, v) => a + v, 0)}`);
+  L.push(`# TYPE agent_session_duration_seconds gauge`, `agent_session_duration_seconds${lb} ${sessDur}`);
   const dur = acc.firstTs && acc.lastTs
     ? Math.max(0, Math.round((Date.parse(acc.lastTs) - Date.parse(acc.firstTs)) / 1000)) : 0;
   L.push(`# TYPE agent_run_duration_seconds gauge`, `agent_run_duration_seconds${lb} ${dur}`);
+  // one TYPE line per family (Prometheus text format); runs of the same agent
+  // type share one label set, so merge them (sum counters, max context,
+  // duration = union of the time ranges)
+  const merged = new Map();
+  for (const sub of subagents) {
+    const m = merged.get(sub.agent) || { acc: { tokens: {}, tools: {}, contextMax: 0, firstTs: null, lastTs: null } };
+    for (const [k, v] of Object.entries(sub.acc.tokens))
+      m.acc.tokens[k] = (m.acc.tokens[k] || 0) + v;
+    for (const [t, v] of Object.entries(sub.acc.tools))
+      m.acc.tools[t] = (m.acc.tools[t] || 0) + v;
+    m.acc.contextMax = Math.max(m.acc.contextMax, sub.acc.contextMax);
+    if (sub.acc.firstTs && (!m.acc.firstTs || sub.acc.firstTs < m.acc.firstTs)) m.acc.firstTs = sub.acc.firstTs;
+    if (sub.acc.lastTs && (!m.acc.lastTs || sub.acc.lastTs > m.acc.lastTs)) m.acc.lastTs = sub.acc.lastTs;
+    merged.set(sub.agent, m);
+  }
+  const tokLines = [], toolLines = [], ctxLines = [], durLines = [];
+  for (const [agent, m] of merged) {
+    const agentLbl = `${labelStr ? labelStr + "," : ""}agent="${esc(agent)}"`;
+    for (const [kind, v] of Object.entries(m.acc.tokens))
+      tokLines.push(`agent_subagent_tokens_total{${agentLbl},kind="${esc(kind)}"} ${v}`);
+    for (const [tool, v] of Object.entries(m.acc.tools))
+      toolLines.push(`agent_subagent_tool_calls_total{${agentLbl},tool="${esc(tool)}"} ${v}`);
+    if (m.acc.contextMax)
+      ctxLines.push(`agent_subagent_context_max_tokens{${agentLbl}} ${m.acc.contextMax}`);
+    const sdur = m.acc.firstTs && m.acc.lastTs
+      ? Math.max(0, Math.round((Date.parse(m.acc.lastTs) - Date.parse(m.acc.firstTs)) / 1000)) : 0;
+    durLines.push(`agent_subagent_duration_seconds{${agentLbl}} ${sdur}`);
+  }
+  if (tokLines.length) L.push(`# TYPE agent_subagent_tokens_total counter`, ...tokLines);
+  if (toolLines.length) L.push(`# TYPE agent_subagent_tool_calls_total counter`, ...toolLines);
+  if (ctxLines.length) L.push(`# TYPE agent_subagent_context_max_tokens gauge`, ...ctxLines);
+  if (durLines.length) L.push(`# TYPE agent_subagent_duration_seconds gauge`, ...durLines);
   return L.join("\n") + "\n";
 }
 
@@ -314,12 +398,14 @@ async function main() {
   const project = projectFromTranscript(transcript);
   if (project) labels.project = project;
   if (selfTest) {
-    process.stdout.write(render(await aggregate(transcript), labels));
+    process.stdout.write(render(await aggregate(transcript), labels,
+                                await aggregateSubagents(transcript)));
     return;
   }
   const event = input.hook_event_name || process.env.AGENT_METRICS_HOOK_EVENT || "";
   if (event === "PostToolUse" && (await throttled(input.session_id))) return;
-  await push(render(await aggregate(transcript), labels), labels);
+  await push(render(await aggregate(transcript), labels,
+                    await aggregateSubagents(transcript)), labels);
   if (event === "SessionEnd" && input.session_id)
     try { await unlink(throttleFile(input.session_id)); } catch { /* best-effort */ }
 }
