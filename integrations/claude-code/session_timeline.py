@@ -36,10 +36,10 @@ def list_sessions(project_dir):
 
 
 def load_events(path):
-    """Assistant turns and tool calls from a transcript. Skips sidechain
-    lines and malformed lines. The transcript writes each content block as
-    its own line sharing one message id: usage is counted once per id,
-    tool blocks are deduped per block."""
+    """Assistant turns and tool calls from a transcript. Skips malformed
+    lines. The transcript writes each content block as its own line sharing
+    one message id: usage is counted once per id, tool blocks are deduped
+    per block."""
     ev, seen_msgs, seen_blocks = [], set(), set()
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
@@ -49,7 +49,7 @@ def load_events(path):
                 e = json.loads(line)
             except ValueError:
                 continue
-            if e.get("type") != "assistant" or e.get("isSidechain"):
+            if e.get("type") != "assistant":
                 continue
             msg = e.get("message") or {}
             mid = msg.get("id")
@@ -78,6 +78,10 @@ def load_events(path):
                         skill = (b.get("input") or {}).get("skill")
                         if skill:
                             ev.append({"t": ts_ms, "kind": "skill", "tokens": 0, "detail": skill})
+                    if b["name"] in ("Task", "Agent"):
+                        st = (b.get("input") or {}).get("subagent_type") \
+                            or (b.get("input") or {}).get("name") or "unknown"
+                        ev.append({"t": ts_ms, "kind": "spawn", "tokens": 0, "detail": st})
     ev.sort(key=lambda e: (e["t"] or 0))
     cum = 0
     for e in ev:
@@ -99,6 +103,34 @@ def summarize(ev):
 
 def esc(s):
     return str(s).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def load_subagents(transcript_path):
+    """Per-subagent summaries from <sid>/subagents/agent-*.jsonl next to the
+    transcript. Each entry: {agent, description, tokens, tool_calls, duration_min}.
+    Missing dir (session spawned none) -> []."""
+    sid = os.path.basename(transcript_path)[:-6]
+    sub_dir = os.path.join(os.path.dirname(transcript_path), sid, "subagents")
+    if not os.path.isdir(sub_dir):
+        return []
+    out = []
+    for f in sorted(os.listdir(sub_dir)):
+        if not (f.startswith("agent-") and f.endswith(".jsonl")):
+            continue
+        p = os.path.join(sub_dir, f)
+        agent, description = "unknown", None
+        try:
+            with open(p[:-6] + ".meta.json", encoding="utf-8") as mf:
+                meta = json.load(mf)
+            agent = str(meta.get("agentType") or agent)
+            description = meta.get("description") and str(meta["description"])
+        except (OSError, ValueError):
+            pass  # unnamed agent
+        ev = load_events(p)
+        res = summarize(ev)
+        res.update(agent=agent, description=description)
+        out.append(res)
+    return out
 
 
 def main():
@@ -137,6 +169,7 @@ def main():
 
     ev = load_events(path)
     res = summarize(ev)
+    subagents = load_subagents(path)
 
     if a.push_gateway:
         try:
@@ -174,6 +207,12 @@ def main():
         L += ["", "## Skills", *[f"- {t}: {n}" for t, n in sorted(by_skill.items(), key=lambda x: -x[1])]]
     if by_plugin:
         L += ["", "## Plugins", *[f"- {t}: {n}" for t, n in sorted(by_plugin.items(), key=lambda x: -x[1])]]
+    if subagents:
+        L += ["", "## Subagents", "",
+              "| Agent | Description | Tokens | Tool calls | Duration, min |", "|---|---|---|---|---|"]
+        for s in subagents:
+            L.append(f"| {s['agent']} | {s['description'] or ''} | {s.get('total_tokens', 0)} | "
+                     f"{s.get('tool_calls', 0)} | {s.get('duration_min', '')} |")
     open(f"{a.out}.md", "w").write("\n".join(L) + "\n")
     print("\n".join(L))
     print(f"\nfiles: {a.out}.md, {a.out}.timeline.csv")

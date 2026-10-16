@@ -19,7 +19,7 @@
 //
 // Offline check:  node push-metrics.mjs --self-test <transcript.jsonl>
 
-import { readFile, rm, stat, writeFile, unlink } from "node:fs/promises";
+import { readFile, readdir, rm, stat, writeFile, unlink } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import os from "node:os";
 import { createInterface } from "node:readline";
@@ -89,6 +89,12 @@ function skillOf(block) {
   return out;
 }
 
+// an Agent/Task tool_use block -> subagent type (the agent's name, e.g. "Explore")
+function spawnTypeOf(block) {
+  if (block.name !== "Task" && block.name !== "Agent") return null;
+  return String(block.input?.subagent_type || block.input?.name || "unknown");
+}
+
 // project from the transcript slug: ~/.claude/projects/-home-<user>-projects-<name>/<sid>.jsonl,
 // also CLAUDE_CONFIG_DIR profiles (~/.saas/profiles/<mode>/claude/projects/...).
 // Unknown slugs (tmp dirs, exotic homes) yield null and the label is omitted.
@@ -104,7 +110,7 @@ function projectFromTranscript(p) {
 }
 
 async function aggregate(transcriptPath) {
-  const acc = { tokens: {}, tools: {}, skills: {}, plugins: {}, contextMax: 0, firstTs: null, lastTs: null };
+  const acc = { tokens: {}, tools: {}, skills: {}, plugins: {}, spawns: {}, contextMax: 0, firstTs: null, lastTs: null };
   // the transcript writes each content block as its own line, siblings sharing
   // one message id: usage is identical across them (count once per id), while
   // tool blocks must be deduped per block, not per message
@@ -115,7 +121,7 @@ async function aggregate(transcriptPath) {
     if (!line.trim()) continue;
     let e;
     try { e = JSON.parse(line); } catch { continue; } // tolerate malformed/truncated lines
-    if (e?.type !== "assistant" || e?.isSidechain) continue;
+    if (e?.type !== "assistant") continue;
     const msg = e.message || {};
     const seen = msg.id && seenMessages.has(msg.id);
     if (msg.id && !seen) seenMessages.add(msg.id);
@@ -136,6 +142,8 @@ async function aggregate(transcriptPath) {
       if (seenBlocks.has(bk)) continue; // dedup API retries of the same block
       if (msg.id) seenBlocks.add(bk);
       acc.tools[b.name] = (acc.tools[b.name] || 0) + 1;
+      const st = spawnTypeOf(b);
+      if (st) acc.spawns[st] = (acc.spawns[st] || 0) + 1;
       const s = skillOf(b);
       if (s) {
         acc.skills[s.skill] = (acc.skills[s.skill] || 0) + 1;
@@ -144,6 +152,29 @@ async function aggregate(transcriptPath) {
     }
   }
   return acc;
+}
+
+// Subagent runs of the session: <project>/<sid>/subagents/agent-<id>.jsonl
+// with a sibling .meta.json holding the agent's name (agentType).
+// Returns [{ agent, description, acc }].
+async function aggregateSubagents(transcriptPath) {
+  const sid = path.basename(transcriptPath).replace(/\.jsonl$/, "");
+  const dir = path.join(path.dirname(transcriptPath), sid, "subagents");
+  let files;
+  try { files = (await readdir(dir)).filter((f) => /^agent-.*\.jsonl$/.test(f)).sort(); }
+  catch { return []; } // no subagents dir — session spawned none
+  const out = [];
+  for (const f of files) {
+    let agent = "unknown";
+    let description = null;
+    try {
+      const meta = JSON.parse(await readFile(path.join(dir, f.replace(/\.jsonl$/, ".meta.json")), "utf8"));
+      if (meta.agentType) agent = String(meta.agentType);
+      if (meta.description) description = String(meta.description);
+    } catch { /* unnamed agent */ }
+    out.push({ agent, description, acc: await aggregate(path.join(dir, f)) });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -220,7 +251,7 @@ function gatewayUrl(extra, token) {
   return `${base.replace(/\/+$/, "")}/metrics/job/${job}/instance/${instance}${extraPath}`;
 }
 
-function render(acc, labels) {
+function render(acc, labels, subagents = []) {
   const L = [];
   const labelStr = Object.entries(labels).map(([k, v]) => `${esc(k)}="${esc(v)}"`).join(",");
   const lb = labelStr ? `{${labelStr}}` : "";
@@ -248,10 +279,38 @@ function render(acc, labels) {
     for (const [plugin, v] of plugins)
       L.push(`agent_plugin_calls_total{${labelStr ? labelStr + "," : ""}plugin="${esc(plugin)}"} ${v}`);
   }
+  const spawns = Object.entries(acc.spawns || {});
+  if (spawns.length) {
+    L.push(`# TYPE agent_subagent_spawns_total counter`);
+    for (const [agent, v] of spawns)
+      L.push(`agent_subagent_spawns_total{${labelStr ? labelStr + "," : ""}agent="${esc(agent)}"} ${v}`);
+  }
   L.push(`# TYPE agent_context_max_tokens gauge`, `agent_context_max_tokens${lb} ${acc.contextMax}`);
   const dur = acc.firstTs && acc.lastTs
     ? Math.max(0, Math.round((Date.parse(acc.lastTs) - Date.parse(acc.firstTs)) / 1000)) : 0;
   L.push(`# TYPE agent_run_duration_seconds gauge`, `agent_run_duration_seconds${lb} ${dur}`);
+  for (const sub of subagents) {
+    const agentLbl = `${labelStr ? labelStr + "," : ""}agent="${esc(sub.agent)}"`;
+    const subTokens = Object.entries(sub.acc.tokens);
+    if (subTokens.length) {
+      L.push(`# TYPE agent_subagent_tokens_total counter`);
+      for (const [kind, v] of subTokens)
+        L.push(`agent_subagent_tokens_total{${agentLbl},kind="${esc(kind)}"} ${v}`);
+    }
+    const subTools = Object.entries(sub.acc.tools);
+    if (subTools.length) {
+      L.push(`# TYPE agent_subagent_tool_calls_total counter`);
+      for (const [tool, v] of subTools)
+        L.push(`agent_subagent_tool_calls_total{${agentLbl},tool="${esc(tool)}"} ${v}`);
+    }
+    if (sub.acc.contextMax)
+      L.push(`# TYPE agent_subagent_context_max_tokens gauge`,
+             `agent_subagent_context_max_tokens{${agentLbl}} ${sub.acc.contextMax}`);
+    const sdur = sub.acc.firstTs && sub.acc.lastTs
+      ? Math.max(0, Math.round((Date.parse(sub.acc.lastTs) - Date.parse(sub.acc.firstTs)) / 1000)) : 0;
+    L.push(`# TYPE agent_subagent_duration_seconds gauge`,
+           `agent_subagent_duration_seconds{${agentLbl}} ${sdur}`);
+  }
   return L.join("\n") + "\n";
 }
 
@@ -314,12 +373,14 @@ async function main() {
   const project = projectFromTranscript(transcript);
   if (project) labels.project = project;
   if (selfTest) {
-    process.stdout.write(render(await aggregate(transcript), labels));
+    process.stdout.write(render(await aggregate(transcript), labels,
+                                await aggregateSubagents(transcript)));
     return;
   }
   const event = input.hook_event_name || process.env.AGENT_METRICS_HOOK_EVENT || "";
   if (event === "PostToolUse" && (await throttled(input.session_id))) return;
-  await push(render(await aggregate(transcript), labels), labels);
+  await push(render(await aggregate(transcript), labels,
+                    await aggregateSubagents(transcript)), labels);
   if (event === "SessionEnd" && input.session_id)
     try { await unlink(throttleFile(input.session_id)); } catch { /* best-effort */ }
 }
