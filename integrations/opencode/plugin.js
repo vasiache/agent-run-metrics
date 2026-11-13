@@ -1,187 +1,139 @@
-// metrics.js — realtime run metrics of an OpenCode agent to PushGateway.
+// agent-run-metrics — OpenCode V1 adapter.
 //
-// Install: <project>/.opencode/plugin/metrics.js (or ~/.config/opencode/plugin/)
-// Env:
-//   AGENT_METRICS_PUSHGATEWAY  https://host[:port]/push/<tenant>   (required;
-//     "<tenant>" is replaced with the tenant_id claim of your bearer token)
-//   AGENT_METRICS_JOB          job label, default "opencode"
-//   AGENT_METRICS_RUNTIME      runtime label, default "opencode"
-//   AGENT_METRICS_INSTANCE     instance label, default = hostname
-//   AGENT_METRICS_LABELS       extra labels "user=vasche,profile=test"
-//   AGENT_METRICS_TOKEN        bearer token (cloud mode), optional
+// Thin integration for OpenCode 1.x (Harness fork 1.18.29 and stable 1.19.x):
+// normalizes host events and delegates configuration, aggregation, throttled
+// delivery, and disposal to the vendor-neutral common core. All behavior
+// lives in integrations/common; this file only maps event shapes.
 //
-// Push: after each tool call and on every assistant message update (both
-// throttled to one push per 15s).
+// Configure with plugin options (see opencode.json "plugin" tuples) or the
+// AGENT_METRICS_* environment variables; explicit options win. Without an
+// endpoint the plugin stays enabled but performs no I/O.
+//
+//   endpoint / AGENT_METRICS_PUSHGATEWAY   PushGateway URL; "<tenant>" is
+//     replaced with the tenant_id claim of the token
+//   token / AGENT_METRICS_TOKEN            bearer token
+//   tokenFile / AGENT_METRICS_TOKEN_FILE   raw token file, reread per push
+//   job, runtime, instance, labels, debug  see integrations/common/config.mjs
 
-import os from "node:os";
-import path from "node:path";
-import { mkdir, readFile, rm } from "node:fs/promises";
-import { execFile } from "node:child_process";
+import { basename } from "node:path";
+import { hostname } from "node:os";
 
-const PUSH_THROTTLE_MS = 15000;
+import { resolveMetricsConfig } from "../common/config.mjs";
+import { createTokenProvider } from "../common/token-provider.mjs";
+import { createPushgatewayClient } from "../common/pushgateway.mjs";
+import { createSessionAggregator } from "../common/session-aggregator.mjs";
+import { createEventMetrics } from "../common/event-metrics.mjs";
+import { countDiffLines } from "../common/diff-lines.mjs";
 
-const state = {
-  tokens: {},   // kind -> counter
-  tools: {},    // tool -> counter
-  cost: 0,
-  contextMax: 0,
-  startedAt: Date.now(),
-  session: null, // short id of the active session; parallel sessions must not share a grouping key
-  lastPush: 0,
-  pushing: false,
-};
-
-function esc(s) {
-  return String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
-}
-
-// base labels shared by every series: runtime + user + extra k=v pairs
-async function baseLabels() {
-  const labels = {
-    runtime: process.env.AGENT_METRICS_RUNTIME || "opencode",
+function normalizeUsage(tokens = {}) {
+  return {
+    input: tokens.input,
+    output: tokens.output,
+    reasoning: tokens.reasoning,
+    cacheRead: tokens.cache?.read,
+    cacheWrite: tokens.cache?.write,
   };
-  for (const kv of (process.env.AGENT_METRICS_LABELS || "").split(",").filter(Boolean)) {
-    const [k, v] = kv.split("=", 2);
-    if (k && v !== undefined) labels[k.trim()] = v.trim();
+}
+
+export const MetricsPlugin = async (input, options = {}) => {
+  const config = resolveMetricsConfig({
+    options,
+    env: process.env,
+    runtime: "opencode",
+    defaults: { instance: hostname() },
+  });
+  const client = createPushgatewayClient({ config, tokenProvider: createTokenProvider(config) });
+  const metrics = createEventMetrics({ config, client, aggregator: createSessionAggregator() });
+
+  const key = input?.project?.id || input?.worktree || input?.directory;
+  const directory = input?.worktree || input?.directory || key;
+  const project = key
+    ? { key, label: directory ? basename(directory) : key }
+    : null;
+
+  function debug(message) {
+    if (config.debug) console.error(`[agent-run-metrics] ${message}`);
   }
-  if (!labels.user) {
-    labels.user = await harnessIdentity() || os.userInfo().username;
-  }
-  if (!labels.project) labels.project = path.basename(process.cwd());
-  if (!labels.session && state.session) labels.session = state.session;
-  return labels;
-}
 
-async function harnessIdentity() {
-  try {
-    const t = JSON.parse(await readFile(os.homedir() + "/.harness/telemetry.json", "utf8"));
-    if (t.user_identity) return String(t.user_identity);
-  } catch { /* harness not installed */ }
-  return null;
-}
+  // tool.execute.before -> after pairing by callID for wall-clock durations;
+  // bounded so an abandoned call id cannot grow the map without limit
+  const pendingToolStarts = new Map();
+  const MAX_PENDING_TOOL_STARTS = 1000;
 
-function tenantFromToken(token) {
-  try {
-    const payload = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8"));
-    return payload.tenant_id ? String(payload.tenant_id) : null;
-  } catch { return null; }
-}
-
-function gatewayUrl(extraLabelsObj, token) {
-  let base = process.env.AGENT_METRICS_PUSHGATEWAY;
-  if (!base) return null;
-  if (base.includes("<tenant>")) {
-    const tenant = tenantFromToken(token || "");
-    if (!tenant) {
-      console.error("[agent-run-metrics] PUSHGATEWAY has <tenant> but the token has no tenant_id claim, push skipped");
-      return null;
+  function rememberToolStart(callID, tool) {
+    if (!callID) return;
+    while (pendingToolStarts.size >= MAX_PENDING_TOOL_STARTS) {
+      pendingToolStarts.delete(pendingToolStarts.keys().next().value);
     }
-    base = base.replace("<tenant>", tenant);
+    pendingToolStarts.set(String(callID), { tool, startedAt: Date.now() });
   }
-  const job = encodeURIComponent(process.env.AGENT_METRICS_JOB || "opencode");
-  const instance = encodeURIComponent(process.env.AGENT_METRICS_INSTANCE || os.hostname());
-  const extraPath = Object.entries(extraLabelsObj)
-    .map(([k, v]) => `/${encodeURIComponent(k)}/${encodeURIComponent(v)}`).join("");
-  return `${base.replace(/\/+$/, "")}/metrics/job/${job}/instance/${instance}${extraPath}`;
-}
 
-function bump(obj, key, n) {
-  obj[key] = (obj[key] || 0) + n;
-}
+  function takeToolDuration(callID) {
+    const entry = callID ? pendingToolStarts.get(String(callID)) : undefined;
+    if (!entry) return undefined;
+    pendingToolStarts.delete(String(callID));
+    return Math.max(0, Date.now() - entry.startedAt);
+  }
 
-function render(labels) {
-  const labelStr = Object.entries(labels).map(([k, v]) => `${esc(k)}="${esc(v)}"`).join(",");
-  const withLabel = (l) => `{${labelStr ? labelStr + "," : ""}${l}}`;
-  const L = [];
-  for (const [kind, v] of Object.entries(state.tokens))
-    L.push(`# TYPE agent_tokens_total counter`,
-           `agent_tokens_total${withLabel(`kind="${esc(kind)}"`)} ${v}`);
-  for (const [tool, v] of Object.entries(state.tools))
-    L.push(`# TYPE agent_tool_calls_total counter`,
-           `agent_tool_calls_total${withLabel(`tool="${esc(tool)}"`)} ${v}`);
-  L.push(`# TYPE agent_context_max_tokens gauge`,
-         `agent_context_max_tokens{${labelStr}} ${state.contextMax}`);
-  L.push(`# TYPE agent_run_duration_seconds gauge`,
-         `agent_run_duration_seconds{${labelStr}} ${Math.round((Date.now() - state.startedAt) / 1000)}`);
-  return L.join("\n") + "\n";
-}
-
-// eharness native integration (ADR-020): no AGENT_METRICS_TOKEN env → resolve
-// the bearer from the grant store ~/.saas/token.json (0600): fresh access
-// token as-is, stale one → ONE silent refresh via the eharness CLI under a
-// mkdir lock (losers skip this push). No grant → no Authorization header.
-let tokenPromise = null;
-async function resolveToken() {
-  if (process.env.AGENT_METRICS_TOKEN) return process.env.AGENT_METRICS_TOKEN;
-  if (tokenPromise) return tokenPromise;
-  tokenPromise = (async () => {
-    const store = path.join(os.homedir(), ".saas", "token.json");
-    try {
-      const s = JSON.parse(await readFile(store, "utf8"));
-      if (s.access_token && s.expires_at && s.expires_at > Date.now() / 1000 + 30)
-        return s.access_token;
-    } catch { return null; } // no grant — standalone mode
-    const lock = store + ".refresh.lock";
-    try {
-      await mkdir(lock);
-    } catch { return null; } // another client is refreshing — skip
-    try {
-      return await new Promise((resolve) => {
-        execFile("eharness", ["auth", "token"], { timeout: 15000 },
-          (e, stdout) => resolve(e ? null : String(stdout).trim() || null));
+  return {
+    "tool.execute.before": async (toolInput) => {
+      rememberToolStart(toolInput?.callID, String(toolInput?.tool || "unknown"));
+    },
+    "tool.execute.after": async (toolInput, result) => {
+      if (!toolInput?.sessionID) return;
+      if (!project) return debug("event dropped: no project identity from the host");
+      const sessionID = String(toolInput.sessionID);
+      const tool = String(toolInput.tool || toolInput.toolName || "unknown");
+      metrics.handle({
+        type: "tool.finished",
+        sessionID,
+        project,
+        tool,
+        durationMs: takeToolDuration(toolInput.callID),
+        time: Date.now(),
       });
-    } finally {
-      await rm(lock, { recursive: true, force: true }).catch(() => {});
-    }
-  })();
-  tokenPromise.catch(() => { tokenPromise = null; });
-  return tokenPromise;
-}
-
-async function push() {
-  const labels = await baseLabels();
-  const token = await resolveToken();
-  const url = gatewayUrl(labels, token);
-  if (!url || state.pushing) return;
-  state.pushing = true;
-  try {
-    const headers = { "Content-Type": "text/plain" };
-    if (token) headers.Authorization = `Bearer ${token}`; // E-070: this line used to go missing, cloud pushes came back 401
-    await fetch(url, { method: "POST", headers, body: render(labels) });
-  } catch (e) {
-    // monitoring must never break the agent
-  } finally {
-    state.pushing = false;
-  }
-}
-
-function pushThrottled() {
-  if (Date.now() - state.lastPush > PUSH_THROTTLE_MS) {
-    state.lastPush = Date.now();
-    push();
-  }
-}
-
-export const MetricsPlugin = async () => ({
-  "tool.execute.after": async (input) => {
-    const tool = input?.tool || input?.toolName || "";
-    if (tool) state.tools[tool] = (state.tools[tool] || 0) + 1;
-    if (input?.sessionID) state.session = String(input.sessionID).slice(0, 8);
-    pushThrottled();
-  },
-  event: async ({ event }) => {
-    if (event?.type !== "message.updated") return;
-    const info = event.properties?.info || {};
-    if (info.role !== "assistant") return;
-    if (info.sessionID) state.session = String(info.sessionID).slice(0, 8);
-    const t = info.tokens || {};
-    if (t.input) bump(state.tokens, "input", t.input);
-    if (t.output) bump(state.tokens, "output", t.output);
-    if (t.reasoning) bump(state.tokens, "reasoning", t.reasoning);
-    const c = t.cache || {};
-    if (c.read) bump(state.tokens, "cache_read", c.read);
-    if (c.write) bump(state.tokens, "cache_write", c.write);
-    if (info.contextWindow > state.contextMax) state.contextMax = info.contextWindow;
-    pushThrottled();
-  },
-});
+      const diff = result?.metadata?.diff;
+      if (typeof diff === "string") {
+        const { added, deleted } = countDiffLines(diff);
+        metrics.handle({ type: "file.edited", sessionID, project, added, deleted, time: Date.now() });
+      }
+    },
+    event: async ({ event }) => {
+      if (event?.type === "session.idle") {
+        const sessionID = event.properties?.sessionID; // direct property, not info
+        if (!sessionID || !project) {
+          if (sessionID) debug("event dropped: no project identity from the host");
+          return;
+        }
+        await metrics.flush({ project, sessionID: String(sessionID) });
+        return;
+      }
+      if (event?.type === "permission.replied") {
+        const sessionID = event.properties?.sessionID;
+        if (!sessionID) return;
+        if (!project) return debug("event dropped: no project identity from the host");
+        metrics.handle({
+          type: "permission.decided",
+          sessionID: String(sessionID),
+          project,
+          decision: event.properties.response === "reject" ? "deny" : "allow",
+          time: Date.now(),
+        });
+        return;
+      }
+      if (event?.type !== "message.updated") return;
+      const info = event.properties?.info || {};
+      if (info.role !== "assistant" || !info.id || !info.sessionID) return;
+      if (!project) return debug("event dropped: no project identity from the host");
+      metrics.handle({
+        type: "message.usage",
+        sessionID: String(info.sessionID),
+        messageID: String(info.id),
+        project,
+        usage: normalizeUsage(info.tokens),
+        time: Date.now(),
+      });
+    },
+    dispose: () => metrics.dispose(),
+  };
+};

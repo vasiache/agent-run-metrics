@@ -9,6 +9,7 @@
 // re-running never duplicates. After install, restart Claude Code (or open
 // /hooks) so the session picks the hooks up.
 import { copyFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import os from "node:os";
@@ -18,9 +19,15 @@ import { fileURLToPath } from "node:url";
 const execFileP = promisify(execFile);
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+// only the built artifact is shippable: the source imports ../common modules,
+// so a lone copied source file would silently fail on every hook event.
+// AGENT_METRICS_HOOK_SOURCE overrides the artifact path (tests use it).
+const HOOK_SOURCE = process.env.AGENT_METRICS_HOOK_SOURCE
+  || path.join(HERE, "..", "..", "dist", "claude-code", "push-metrics.mjs");
 const HOOK_DIR = path.join(os.homedir(), ".claude", "hooks", "agent-metrics");
 const HOOK_SCRIPT = path.join(HOOK_DIR, "push-metrics.mjs");
 const SETTINGS = path.join(os.homedir(), ".claude", "settings.json");
+
 const HOOK_CMD = `node ${HOOK_SCRIPT}`;
 const HOOK_EVENTS = ["PostToolUse", "Stop", "SessionEnd"];
 
@@ -117,8 +124,11 @@ if (uninstall) {
 if (Number(process.versions.node.split(".")[0]) < 18) die(`node >= 18 required, found ${process.versions.node}`);
 
 // 2. copy the hook script
+if (!existsSync(HOOK_SOURCE)) {
+  die(`built hook artifact missing at ${HOOK_SOURCE}; run \`npm run build\` first`);
+}
 await mkdir(HOOK_DIR, { recursive: true });
-await copyFile(path.join(HERE, "push-metrics.mjs"), HOOK_SCRIPT);
+await copyFile(HOOK_SOURCE, HOOK_SCRIPT);
 
 // 3. merge settings.json
 const s = await readSettings();

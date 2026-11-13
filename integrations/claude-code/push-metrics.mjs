@@ -5,65 +5,35 @@
 // Stop (every turn end), SessionEnd (final push). Each invocation re-reads the whole
 // session transcript (JSONL) and pushes cumulative totals. Holds no state, safe on crashes.
 //
-// Env:
-//   AGENT_METRICS_PUSHGATEWAY  http://host:9091   (required)
+// Configuration (environment; generic options shared with integrations/common):
+//   AGENT_METRICS_PUSHGATEWAY  http://host:9091   (required to deliver)
 //   AGENT_METRICS_JOB          job label, default "claude-code"
 //   AGENT_METRICS_RUNTIME      runtime label, default "claude-code"
 //   AGENT_METRICS_INSTANCE     instance label, default = hostname
 //   AGENT_METRICS_LABELS       extra labels "user=vasche,task=BLK-1"
-//   AGENT_METRICS_TOKEN        bearer token, sent as Authorization header;
-//                              if unset — eharness grant ~/.saas/token.json
-//                              (fresh access, silent refresh via `eharness auth
-//                              token`); no grant → no Authorization header
+//   AGENT_METRICS_TOKEN        bearer token, sent as Authorization header
+//   AGENT_METRICS_TOKEN_FILE   raw token file, reread per push
 //   AGENT_METRICS_DEBUG        set to log push failures to stderr
 //
 // Offline check:  node push-metrics.mjs --self-test <transcript.jsonl>
 
-import { readFile, readdir, rm, stat, writeFile, unlink } from "node:fs/promises";
-import { execFile } from "node:child_process";
+import { readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { createInterface } from "node:readline";
 import { createReadStream } from "node:fs";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-// ---------------------------------------------------------------------------
-// Token resolution
-// ---------------------------------------------------------------------------
-// AGENT_METRICS_TOKEN wins. Without it, eharness native integration (ADR-020):
-// read the grant store ~/.saas/token.json (0600); a fresh access token is used
-// as-is, a stale one triggers ONE silent refresh via the eharness CLI under a
-// mkdir lock (concurrent hooks: one refreshes, losers skip this push — the
-// next one finds a fresh token). No grant → null → push without Authorization
-// (standalone self-hosted gateway keeps working).
-
-async function resolveToken() {
-  if (process.env.AGENT_METRICS_TOKEN) return process.env.AGENT_METRICS_TOKEN;
-  const store = path.join(os.homedir(), ".saas", "token.json");
-  let stale = false;
-  try {
-    const s = JSON.parse(await readFile(store, "utf8"));
-    if (s.access_token && s.expires_at && s.expires_at > Date.now() / 1000 + 30)
-      return s.access_token;
-    stale = true;
-  } catch { return null; } // no grant — standalone mode
-  if (!stale) return null;
-  const lock = store + ".refresh.lock";
-  try {
-    await (await import("node:fs/promises")).mkdir(lock);
-  } catch { return null; } // another hook is refreshing — skip this push
-  try {
-    return await new Promise((resolve) => {
-      execFile("eharness", ["auth", "token"], { timeout: 15000 },
-        (e, stdout) => resolve(e ? null : String(stdout).trim() || null));
-    });
-  } finally {
-    await rm(lock, { recursive: true, force: true }).catch(() => {});
-  }
-}
+import { createTokenProvider } from "../common/token-provider.mjs";
+import { createPushgatewayClient } from "../common/pushgateway.mjs";
+import { MetricsConfigurationError } from "../common/config.mjs";
+import { lineDelta } from "../common/diff-lines.mjs";
 
 const PUSH_THROTTLE_MS = 15000;
 // matches the edit vocabulary of session_timeline.py
 const EDIT_TOOLS = new Set(["Edit", "Write", "NotebookEdit"]);
+
+const isDirectRun = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 // ---------------------------------------------------------------------------
 // Metrics aggregation over the transcript
@@ -111,21 +81,57 @@ function projectFromTranscript(p) {
   return null;
 }
 
+// approximate added/deleted lines from an edit tool_use input; tools without
+// textual before/after pairs (NotebookEdit) contribute nothing
+function editLinesOf(block) {
+  const input = block.input || {};
+  if (block.name === "Edit") return lineDelta(input.old_string, input.new_string);
+  if (block.name === "MultiEdit") {
+    const total = { added: 0, deleted: 0 };
+    for (const edit of Array.isArray(input.edits) ? input.edits : []) {
+      const delta = lineDelta(edit?.old_string, edit?.new_string);
+      total.added += delta.added;
+      total.deleted += delta.deleted;
+    }
+    return total;
+  }
+  if (block.name === "Write") return lineDelta(undefined, input.content);
+  return { added: 0, deleted: 0 };
+}
+
 async function aggregate(transcriptPath) {
   const acc = { tokens: {}, tools: {}, skills: {}, plugins: {}, spawns: {}, edits: 0, turns: 0,
+                editLines: { added: 0, deleted: 0 }, toolDurationMs: {},
                 contextMax: 0, firstTs: null, lastTs: null };
   // the transcript writes each content block as its own line, siblings sharing
   // one message id: usage is identical across them (count once per id), while
   // tool blocks must be deduped per block, not per message
   const seenMessages = new Set();
   const seenBlocks = new Set();
+  const pendingToolUses = new Map(); // tool_use_id -> { tool, ts }, one pass only
   const rl = createInterface({ input: createReadStream(transcriptPath), crlfDelay: Infinity });
   for await (const line of rl) {
     if (!line.trim()) continue;
     let e;
     try { e = JSON.parse(line); } catch { continue; } // tolerate malformed/truncated lines
+    const msg = e?.message || {};
+    if (e?.type === "user") {
+      // tool_result entries pair back to their tool_use by id; first result wins
+      for (const b of Array.isArray(msg.content) ? msg.content : []) {
+        if (b?.type !== "tool_result" || !b.tool_use_id) continue;
+        const pending = pendingToolUses.get(b.tool_use_id);
+        if (!pending) continue;
+        pendingToolUses.delete(b.tool_use_id);
+        const started = Date.parse(pending.ts);
+        const finished = Date.parse(e.timestamp);
+        if (Number.isFinite(started) && Number.isFinite(finished)) {
+          const durationMs = Math.max(0, finished - started);
+          acc.toolDurationMs[pending.tool] = (acc.toolDurationMs[pending.tool] || 0) + durationMs;
+        }
+      }
+      continue;
+    }
     if (e?.type !== "assistant") continue;
-    const msg = e.message || {};
     const seen = msg.id && seenMessages.has(msg.id);
     if (msg.id && !seen) { seenMessages.add(msg.id); acc.turns++; }
     if (!seen) {
@@ -146,6 +152,17 @@ async function aggregate(transcriptPath) {
       if (msg.id) seenBlocks.add(bk);
       acc.tools[b.name] = (acc.tools[b.name] || 0) + 1;
       if (EDIT_TOOLS.has(b.name)) acc.edits++;
+      if (b.id) {
+        // wall-clock start for tool_result pairing; bounded so abandoned
+        // call ids cannot grow the map without limit
+        if (pendingToolUses.size >= 2000) pendingToolUses.delete(pendingToolUses.keys().next().value);
+        pendingToolUses.set(b.id, { tool: String(b.name), ts: e.timestamp });
+      }
+      const delta = editLinesOf(b);
+      if (delta.added || delta.deleted) {
+        acc.editLines.added += delta.added;
+        acc.editLines.deleted += delta.deleted;
+      }
       const st = spawnTypeOf(b);
       if (st) acc.spawns[st] = (acc.spawns[st] || 0) + 1;
       const s = skillOf(b);
@@ -185,25 +202,6 @@ async function aggregateSubagents(transcriptPath) {
 // Identity + labels
 // ---------------------------------------------------------------------------
 
-async function harnessIdentity() {
-  try {
-    const t = JSON.parse(await readFile(path.join(os.homedir(), ".harness", "telemetry.json"), "utf8"));
-    if (t.user_identity) return String(t.user_identity);
-  } catch { /* harness not installed */ }
-  return null;
-}
-
-async function harnessProfile() {
-  for (const p of [path.join(os.homedir(), ".harness", "profile.yaml"),
-                   path.join(os.homedir(), ".opencode", ".harness", "profile.yaml")]) {
-    try {
-      const m = (await readFile(p, "utf8")).match(/^profile:\s*(\S+)\s*$/m);
-      if (m) return m[1];
-    } catch { /* no profile file */ }
-  }
-  return null;
-}
-
 function extraLabels() {
   const out = {};
   for (const kv of (process.env.AGENT_METRICS_LABELS || "").split(",").filter(Boolean)) {
@@ -213,17 +211,29 @@ function extraLabels() {
   return out;
 }
 
-async function baseLabels() {
-  const labels = await extraLabels();
-  if (!labels.runtime) labels.runtime = process.env.AGENT_METRICS_RUNTIME || "claude-code";
-  if (!labels.user) {
-    const u = (await harnessIdentity()) || os.userInfo().username;
-    labels.user = u;
+// Per-run identity: parallel sessions on one host must not share a grouping
+// key. The session label keeps the full id; project is the decoded basename.
+// Extra labels may not use reserved names or invalid Prometheus identifiers —
+// that would merge sessions or break the push (spec: disable delivery with a
+// single configuration error instead).
+const RESERVED_LABELS = new Set([
+  "runtime", "session", "project", "instance", "job",
+  "kind", "tool", "skill", "plugin", "agent",
+]);
+const LABEL_NAME = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+
+function labelsFor(sessionID, transcriptPath, extra = extraLabels()) {
+  const labels = {};
+  for (const [key, value] of Object.entries(extra)) {
+    if (!LABEL_NAME.test(key)) throw new MetricsConfigurationError(`invalid label name: ${key}`);
+    if (RESERVED_LABELS.has(key)) throw new MetricsConfigurationError(`reserved label name: ${key}`);
+    labels[key] = String(value);
   }
-  if (!labels.profile) {
-    const p = await harnessProfile();
-    if (p) labels.profile = p;
-  }
+  labels.runtime = process.env.AGENT_METRICS_RUNTIME || "claude-code";
+  labels.user = os.userInfo().username;
+  if (sessionID) labels.session = String(sessionID); // full id, never truncated
+  const project = projectFromTranscript(transcriptPath);
+  if (project) labels.project = project;
   return labels;
 }
 
@@ -232,28 +242,6 @@ async function baseLabels() {
 // ---------------------------------------------------------------------------
 
 const esc = (s) => String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
-
-function gatewayUrl(extra, token) {
-  let base = process.env.AGENT_METRICS_PUSHGATEWAY;
-  if (base && base.includes("<tenant>")) {
-    let tenant = null;
-    try {
-      const payload = JSON.parse(Buffer.from((token || "").split(".")[1], "base64url").toString("utf8"));
-      tenant = payload.tenant_id ? String(payload.tenant_id) : null;
-    } catch { /* bad token */ }
-    if (!tenant) {
-      console.error("[agent-run-metrics] PUSHGATEWAY has <tenant> but the token has no tenant_id claim");
-      process.exit(2);
-    }
-    base = base.replace("<tenant>", tenant);
-  }
-  if (!base) return null;
-  const job = encodeURIComponent(process.env.AGENT_METRICS_JOB || "claude-code");
-  const instance = encodeURIComponent(process.env.AGENT_METRICS_INSTANCE || os.hostname());
-  const extraPath = Object.entries(extra)
-    .map(([k, v]) => `/${encodeURIComponent(k)}/${encodeURIComponent(v)}`).join("");
-  return `${base.replace(/\/+$/, "")}/metrics/job/${job}/instance/${instance}${extraPath}`;
-}
 
 function render(acc, labels, subagents = []) {
   const L = [];
@@ -289,8 +277,22 @@ function render(acc, labels, subagents = []) {
     for (const [agent, v] of spawns)
       L.push(`agent_subagent_spawns_total{${labelStr ? labelStr + "," : ""}agent="${esc(agent)}"} ${v}`);
   }
+  const editLines = acc.editLines || {};
+  if (editLines.added > 0 || editLines.deleted > 0) {
+    L.push(`# TYPE agent_file_edits_total counter`);
+    L.push(`agent_file_edits_total{${labelStr ? labelStr + "," : ""}kind="added"} ${editLines.added}`);
+    L.push(`agent_file_edits_total{${labelStr ? labelStr + "," : ""}kind="deleted"} ${editLines.deleted}`);
+  }
+  const durations = Object.entries(acc.toolDurationMs || {}).filter(([, v]) => v > 0);
+  if (durations.length) {
+    L.push(`# TYPE agent_tool_duration_seconds_total counter`);
+    for (const [tool, v] of durations) {
+      const seconds = Math.round((v / 1000) * 1000) / 1000;
+      L.push(`agent_tool_duration_seconds_total{${labelStr ? labelStr + "," : ""}tool="${esc(tool)}"} ${seconds}`);
+    }
+  }
   L.push(`# TYPE agent_context_max_tokens gauge`, `agent_context_max_tokens${lb} ${acc.contextMax}`);
-  // session summary, same family names as the report scripts (agent_metrics.py),
+  // session summary, same family names as the report scripts,
   // so the dashboard's session stat panels fill from the live hook too
   const sessDur = acc.firstTs && acc.lastTs
     ? Math.max(0, Math.round((Date.parse(acc.lastTs) - Date.parse(acc.firstTs)) / 1000)) : 0;
@@ -339,21 +341,35 @@ function render(acc, labels, subagents = []) {
   return L.join("\n") + "\n";
 }
 
-async function push(body, extraLabelsObj) {
-  const token = await resolveToken();
-  const url = gatewayUrl(extraLabelsObj, token);
-  if (!url) return;
-  const headers = { "Content-Type": "text/plain" };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  try {
-    const res = await fetch(url, { method: "POST", headers, body,
-                                   signal: AbortSignal.timeout(5000) });
-    if (!res.ok && process.env.AGENT_METRICS_DEBUG)
-      console.error(`agent-metrics: push failed: HTTP ${res.status}`);
-  } catch (e) {
-    if (process.env.AGENT_METRICS_DEBUG) console.error(`agent-metrics: push error: ${e.message}`);
-    // monitoring must never break the agent
-  }
+// token: AGENT_METRICS_TOKEN wins, then AGENT_METRICS_TOKEN_FILE (reread per
+// push, so rotation applies to the next hook invocation). No implicit vendor
+// grant discovery: an explicitly configured file that fails fails the push.
+const tokenProvider = createTokenProvider({
+  token: process.env.AGENT_METRICS_TOKEN,
+  tokenFile: process.env.AGENT_METRICS_TOKEN_FILE,
+});
+
+async function push(body, labels) {
+  const endpoint = process.env.AGENT_METRICS_PUSHGATEWAY;
+  if (!endpoint) return false;
+  const debug = !!process.env.AGENT_METRICS_DEBUG;
+  const client = createPushgatewayClient({
+    config: {
+      enabled: true,
+      endpoint,
+      job: process.env.AGENT_METRICS_JOB || "claude-code",
+      runtime: labels.runtime,
+      instance: process.env.AGENT_METRICS_INSTANCE || os.hostname(),
+      labels: {},
+      token: null,
+      tokenFile: null,
+      debug,
+    },
+    tokenProvider,
+  });
+  const delivered = await client.push({ labels, body });
+  if (!delivered && debug) console.error("agent-metrics: push failed");
+  return delivered;
 }
 
 // ---------------------------------------------------------------------------
@@ -391,12 +407,15 @@ async function main() {
   const transcript = selfTest ? process.argv[3]
     : (process.argv[2] || input.transcript_path);
   if (!transcript) process.exit(0);
-  const labels = await baseLabels();
   // per-run identity: parallel sessions on one host must not share a grouping key
   const sid = String(input.session_id || process.env.AGENT_METRICS_SESSION || "");
-  if (sid) labels.session = sid.slice(0, 8);
-  const project = projectFromTranscript(transcript);
-  if (project) labels.project = project;
+  let labels;
+  try {
+    labels = labelsFor(sid, transcript);
+  } catch (error) {
+    if (process.env.AGENT_METRICS_DEBUG) console.error(`agent-metrics: ${error.message}, push disabled`);
+    return; // misconfiguration disables delivery; the agent keeps working
+  }
   if (selfTest) {
     process.stdout.write(render(await aggregate(transcript), labels,
                                 await aggregateSubagents(transcript)));
@@ -410,4 +429,6 @@ async function main() {
     try { await unlink(throttleFile(input.session_id)); } catch { /* best-effort */ }
 }
 
-main().catch(() => process.exit(0)); // monitoring must never break the agent
+export { aggregate, aggregateSubagents, render, labelsFor, main };
+
+if (isDirectRun) main().catch(() => process.exit(0)); // monitoring must never break the agent

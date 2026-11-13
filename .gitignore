@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 run.md
 run.timeline.csv
+node_modules/
 
 # hidden dirs
 .*/

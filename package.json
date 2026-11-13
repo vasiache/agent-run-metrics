@@ -1,0 +1,17 @@
+{
+  "name": "agent-run-metrics",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "build": "node scripts/build.mjs",
+    "check:artifacts": "node scripts/check-artifacts.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.5"
+  }
+}
