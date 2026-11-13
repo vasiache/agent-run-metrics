@@ -9,7 +9,7 @@ import argparse, csv, json, os, re, sqlite3, sys
 from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "common"))
-from agent_metrics import harness_identity, push_summary  # noqa: E402
+from agent_metrics import push_summary  # noqa: E402
 
 DEFAULT_DB = os.path.expanduser("~/.local/share/opencode/opencode.db")
 EDIT_TOOLS = {"edit", "write", "patch", "multiedit", "apply_patch"}
@@ -146,7 +146,7 @@ def main():
     ap.add_argument("--out", default="run", help="output file prefix")
     ap.add_argument("--push-gateway", help="PushGateway URL (http://host:9091), pushes the session summary")
     ap.add_argument("--label", action="append", default=[],
-                    help="PushGateway label: key=value (user=vasche, task=BLK-15397, profile=test)")
+                    help="PushGateway label: key=value (user=alice, task=PROJ-123, profile=test)")
     ap.add_argument("--runtime", default="opencode", help="runtime label")
     ap.add_argument("--token", help="bearer token for cloud metrics endpoint (optional)")
     a = ap.parse_args()

@@ -10,7 +10,7 @@
 //   AGENT_METRICS_JOB          job label, default "claude-code"
 //   AGENT_METRICS_RUNTIME      runtime label, default "claude-code"
 //   AGENT_METRICS_INSTANCE     instance label, default = hostname
-//   AGENT_METRICS_LABELS       extra labels "user=vasche,task=BLK-1"
+//   AGENT_METRICS_LABELS       extra labels "user=alice,task=PROJ-1"
 //   AGENT_METRICS_TOKEN        bearer token, sent as Authorization header
 //   AGENT_METRICS_TOKEN_FILE   raw token file, reread per push
 //   AGENT_METRICS_DEBUG        set to log push failures to stderr
@@ -68,7 +68,7 @@ function spawnTypeOf(block) {
 }
 
 // project from the transcript slug: ~/.claude/projects/-home-<user>-projects-<name>/<sid>.jsonl,
-// also CLAUDE_CONFIG_DIR profiles (~/.saas/profiles/<mode>/claude/projects/...).
+// also CLAUDE_CONFIG_DIR-style profile project directories.
 // Unknown slugs (tmp dirs, exotic homes) yield null and the label is omitted.
 function projectFromTranscript(p) {
   const m = String(p).match(/\/(?:\.claude|profiles\/[^/]+\/claude)\/projects\/([^/]+)\//);

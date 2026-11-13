@@ -4,8 +4,8 @@ Counters for AI coding agents: how many tokens a session burned, which tools
 it ran, how long it took. The data lands in your own monitoring (Prometheus
 PushGateway, VictoriaMetrics, Grafana) and stays on your infrastructure.
 
-Supported agents: OpenCode (V1 API — stable 1.19.x and the CRPT Harness fork
-1.18.x) and Claude Code. Others are planned; see
+Supported agents: OpenCode (V1 plugin API — 1.18.x and 1.19.x
+distributions) and Claude Code. Others are planned; see
 [docs/adapter-template.md](docs/adapter-template.md) for the adapter
 contract.
 
@@ -55,7 +55,7 @@ OpenCode V1 also accepts per-plugin options (the `"plugin": [[name, options]]`
 tuple in `opencode.json`); explicit options win over environment variables:
 
 ```jsonc
-{ "plugin": [["./metrics.js", { "endpoint": "http://localhost:9091", "labels": { "user": "vasche" } }]] }
+{ "plugin": [["./metrics.js", { "endpoint": "http://localhost:9091", "labels": { "user": "alice" } }]] }
 ```
 
 Report for a finished session:
@@ -63,7 +63,7 @@ Report for a finished session:
 ```bash
 python3 integrations/opencode/run_timeline.py --list
 python3 integrations/opencode/run_timeline.py --session <id> \
-    --push-gateway http://localhost:9091 --label user=vasche
+    --push-gateway http://localhost:9091 --label user=alice
 ```
 
 The report reads the local OpenCode database read-only and writes `run.md`
@@ -94,7 +94,7 @@ Report for a finished session:
 ```bash
 python3 integrations/claude-code/session_timeline.py --list
 python3 integrations/claude-code/session_timeline.py --session <id> \
-    --push-gateway http://localhost:9091 --label user=vasche
+    --push-gateway http://localhost:9091 --label user=alice
 ```
 
 ## Configuration (live counters)
@@ -112,11 +112,10 @@ Explicit plugin options win over environment variables.
 | `tokenFile` / `AGENT_METRICS_TOKEN_FILE` | none | raw token file, trimmed, reread per push (rotation applies on the next delivery); a missing, empty, or unreadable explicitly configured file fails that push |
 | `debug` / `AGENT_METRICS_DEBUG` | off | concise failure logging to stderr; never logs credentials |
 
-The `user` label defaults to the OS username. The previous implicit
-Harness/eharness fallbacks (`~/.harness/telemetry.json` identity, harness
-telemetry families, `~/.saas/token.json` grants, `eharness auth token`
-refresh) were removed from the generic integrations; configure them via
-labels or a token file instead.
+The `user` label defaults to the OS username. Previous implicit
+deployment-specific identity and grant-discovery fallbacks (vendor
+telemetry and token files) were removed from the generic integrations;
+configure them via labels or a token file instead.
 
 ## Metrics reference
 
@@ -174,7 +173,7 @@ when you pass `--gate-regex` and `--watch`.
 ## Compatibility
 
 - OpenCode V1 plugin API (`MetricsPlugin(input, options)`) — supported:
-  stable 1.19.x and the CRPT Harness fork 1.18.x. The next-generation
+  1.18.x and 1.19.x distributions. The next-generation
   OpenCode plugin API is **pending feasibility**: its current dev
   documentation does not expose the usage snapshots and completed-tool
   events this project needs.

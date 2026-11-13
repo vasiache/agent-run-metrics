@@ -1,6 +1,6 @@
 // agent-run-metrics — OpenCode V1 adapter.
 //
-// Thin integration for OpenCode 1.x (Harness fork 1.18.29 and stable 1.19.x):
+// Thin integration for OpenCode 1.x (1.18.x distributions and stable 1.19.x):
 // normalizes host events and delegates configuration, aggregation, throttled
 // delivery, and disposal to the vendor-neutral common core. All behavior
 // lives in integrations/common; this file only maps event shapes.

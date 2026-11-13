@@ -42,13 +42,11 @@ Manual install (fallback): copy `push-metrics.mjs` to
 
 Identity and scope labels are filled automatically:
 
-- `user`: from `~/.harness/telemetry.json` (`user_identity`), else the OS
-  username; `AGENT_METRICS_LABELS=user=...` overrides.
-- `profile`: the harness profile, when one exists.
-- `session`: the first 8 chars of the session id, so parallel sessions on one
-  host push under separate grouping keys instead of overwriting each other.
-- `project`: the basename of the working directory, derived from the transcript
-  path (`.../-home-me-projects-myrepo/...` becomes `myrepo`).
+- `user`: the OS username; `AGENT_METRICS_LABELS=user=...` overrides.
+- `session`: the full session id, so parallel sessions on one host push under
+  separate grouping keys instead of overwriting each other. Never truncated.
+- `project`: the project name decoded from the transcript path
+  (`.../-home-me-projects-myrepo/...` becomes `myrepo`).
 
 | Hook | What happens |
 |---|---|
@@ -85,7 +83,7 @@ Prints what would be sent, without any network access.
 ```bash
 python3 session_timeline.py --list
 python3 session_timeline.py --session <id> \
-    --push-gateway http://localhost:9091 --label user=vasche
+    --push-gateway http://localhost:9091 --label user=alice
 ```
 
 Writes `run.md` and `run.timeline.csv` next to the current directory and sends

@@ -1,10 +1,6 @@
+node_modules/
 __pycache__/
 *.pyc
 run.md
 run.timeline.csv
-node_modules/
-
-# hidden dirs
-.*/
-!.gitignore
-.
+.claude/

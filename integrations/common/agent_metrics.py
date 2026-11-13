@@ -1,8 +1,8 @@
 """Shared helpers for the report scripts: label escaping, user identity,
-PushGateway push of the agent_session_* summary. No third-party deps."""
+PushGateway push of the agent_session_* summary. No third-party deps.
+Deployment-specific identity and tenant handling are out of scope here:
+the user label is the OS username, and the push URL is used as given."""
 import getpass
-import json
-import os
 import socket
 import urllib.request
 
@@ -19,31 +19,12 @@ def esc(s):
     return str(s).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
-def harness_identity():
-    """user from ~/.harness/telemetry.json, or None."""
-    try:
-        with open(os.path.expanduser("~/.harness/telemetry.json")) as f:
-            t = json.load(f)
-        return str(t["user_identity"])
-    except Exception:
-        return None
-
-
-def _tenant_from_token(token: str | None) -> str | None:
-    import base64 as _b64, json as _json
-    try:
-        payload = _json.loads(_b64.urlsafe_b64decode((token or "").split(".")[1] + "=="))
-        return str(payload.get("tenant_id")) if payload.get("tenant_id") else None
-    except Exception:
-        return None
-
-
 def push_summary(res, sid, push_gateway, label=(), runtime="unknown", token=None,
                  gates=()):
     """POST the session summary to PushGateway. Print the URL, raise on failure."""
     labels = {k.split("=", 1)[0]: k.split("=", 1)[1] for k in label if "=" in k}
     labels.setdefault("runtime", runtime)
-    labels.setdefault("user", harness_identity() or getpass.getuser())
+    labels.setdefault("user", getpass.getuser())
     base = f'session="{esc(sid)}"' + "".join(f',{esc(k)}="{esc(v)}"' for k, v in labels.items())
     lines = []
     for key, family in FAMILIES:
@@ -56,12 +37,6 @@ def push_summary(res, sid, push_gateway, label=(), runtime="unknown", token=None
         if "min_edit_to_gate" in g:
             lines.append(f'agent_edit_to_gate_seconds{{session="{esc(sid)}",gate="{esc(g["time"])}"}} '
                          f'{int(g["min_edit_to_gate"] * 60)}')
-    if "<tenant>" in push_gateway:
-        tenant = _tenant_from_token(token)
-        if not tenant:
-            print("[agent-run-metrics] PUSHGATEWAY has <tenant> but the token has no tenant_id claim, push skipped")
-            return None
-        push_gateway = push_gateway.replace("<tenant>", tenant)
     url = (f"{push_gateway.rstrip('/')}/metrics/job/agent"
            f"/instance/{socket.gethostname()}/session/{esc(sid)}")
     headers = {"Content-Type": "text/plain"}
