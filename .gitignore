@@ -4,3 +4,7 @@ __pycache__/
 run.md
 run.timeline.csv
 .claude/
+
+# Скрытые файлы/папки вне git.
+.*
+!.gitignore
