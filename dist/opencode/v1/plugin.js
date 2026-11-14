@@ -1,8 +1,9 @@
 // integrations/opencode/plugin.js
-import { basename } from "node:path";
-import { hostname } from "node:os";
+import { basename, join } from "node:path";
+import { homedir, hostname } from "node:os";
 
 // integrations/common/config.mjs
+import { existsSync, readFileSync } from "node:fs";
 var RESERVED_LABELS = /* @__PURE__ */ new Set([
   "runtime",
   "session",
@@ -17,6 +18,30 @@ var RESERVED_LABELS = /* @__PURE__ */ new Set([
   "decision"
 ]);
 var LABEL_NAME = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+function readConfigFile(configFilePath) {
+  const paths = Array.isArray(configFilePath) ? configFilePath : [configFilePath];
+  for (const path of paths) {
+    if (!path) continue;
+    let raw;
+    try {
+      if (!existsSync(path)) continue;
+      raw = readFileSync(path, "utf8");
+    } catch {
+      continue;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      throw new MetricsConfigurationError(`invalid config file ${path}: ${error.message}`);
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new MetricsConfigurationError(`config file must contain a JSON object: ${path}`);
+    }
+    return parsed;
+  }
+  return null;
+}
 var MetricsConfigurationError = class extends Error {
   constructor(message) {
     super(message);
@@ -51,9 +76,10 @@ function validateLabels(labels) {
   }
   return labels;
 }
-function resolveMetricsConfig({ options = {}, env = process.env, runtime, defaults = {} }) {
-  const endpoint = first(options.endpoint, env.AGENT_METRICS_PUSHGATEWAY);
-  const debug = booleanValue(options.debug ?? env.AGENT_METRICS_DEBUG);
+function resolveMetricsConfig({ options = {}, env = process.env, runtime, defaults = {}, configFilePath }) {
+  const file = readConfigFile(configFilePath) ?? {};
+  const endpoint = first(options.endpoint, env.AGENT_METRICS_PUSHGATEWAY, file.endpoint);
+  const debug = booleanValue(options.debug ?? env.AGENT_METRICS_DEBUG ?? file.debug);
   if (!endpoint) {
     return {
       enabled: false,
@@ -70,12 +96,12 @@ function resolveMetricsConfig({ options = {}, env = process.env, runtime, defaul
   return {
     enabled: true,
     endpoint,
-    job: first(options.job, env.AGENT_METRICS_JOB, defaults.job, runtime),
-    runtime: first(options.runtime, env.AGENT_METRICS_RUNTIME, runtime),
-    instance: first(options.instance, env.AGENT_METRICS_INSTANCE, defaults.instance),
-    labels: validateLabels(parseLabels(options.labels ?? env.AGENT_METRICS_LABELS)),
-    token: first(options.token, env.AGENT_METRICS_TOKEN),
-    tokenFile: first(options.tokenFile, env.AGENT_METRICS_TOKEN_FILE),
+    job: first(options.job, env.AGENT_METRICS_JOB, defaults.job, file.job, runtime),
+    runtime: first(options.runtime, env.AGENT_METRICS_RUNTIME, file.runtime, runtime),
+    instance: first(options.instance, env.AGENT_METRICS_INSTANCE, defaults.instance, file.instance),
+    labels: validateLabels(parseLabels(options.labels ?? env.AGENT_METRICS_LABELS ?? file.labels)),
+    token: first(options.token, env.AGENT_METRICS_TOKEN, file.token),
+    tokenFile: first(options.tokenFile, env.AGENT_METRICS_TOKEN_FILE, file.tokenFile),
     debug
   };
 }
@@ -543,6 +569,13 @@ function countDiffLines(diffText) {
 }
 
 // integrations/opencode/plugin.js
+function configFilePathCandidates(env = process.env, home = homedir()) {
+  return [
+    env.OPENCODE_CONFIG_DIR,
+    join(home, ".config", "opencode"),
+    join(home, ".opencode")
+  ].filter(Boolean).map((root) => join(root, "agent-metrics.json"));
+}
 function normalizeUsage(tokens = {}) {
   return {
     input: tokens.input,
@@ -557,7 +590,8 @@ var MetricsPlugin = async (input, options = {}) => {
     options,
     env: process.env,
     runtime: "opencode",
-    defaults: { instance: hostname() }
+    defaults: { instance: hostname() },
+    configFilePath: configFilePathCandidates()
   });
   const client = createPushgatewayClient({ config, tokenProvider: createTokenProvider(config) });
   const metrics = createEventMetrics({ config, client, aggregator: createSessionAggregator() });
@@ -645,5 +679,6 @@ var MetricsPlugin = async (input, options = {}) => {
   };
 };
 export {
-  MetricsPlugin
+  MetricsPlugin,
+  configFilePathCandidates
 };

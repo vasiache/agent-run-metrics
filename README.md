@@ -58,6 +58,43 @@ tuple in `opencode.json`); explicit options win over environment variables:
 { "plugin": [["./metrics.js", { "endpoint": "http://localhost:9091", "labels": { "user": "alice" } }]] }
 ```
 
+### Install via npm
+
+The repository is an npm-installable OpenCode plugin: the package entry point
+is the built artifact, so an npm delivery mechanism can install and load it
+without any local file copying.
+
+```bash
+npm install agent-run-metrics
+```
+
+```jsonc
+{ "plugin": [["agent-run-metrics", { "endpoint": "http://localhost:9091" }]] }
+```
+
+### Config file
+
+npm-installed plugins receive no options, so the OpenCode integration also
+reads a JSON settings file from the host's configuration root — the first
+existing file wins:
+
+1. `$OPENCODE_CONFIG_DIR/agent-metrics.json`
+2. `~/.config/opencode/agent-metrics.json`
+3. `~/.opencode/agent-metrics.json`
+
+```json
+{
+  "endpoint": "http://localhost:9091",
+  "tokenFile": "~/gateway.token",
+  "labels": { "user": "alice" }
+}
+```
+
+The file understands the same fields as the options table above. Precedence
+per field: plugin options, then `AGENT_METRICS_*` environment variables, then
+this file, then defaults — a local override beats the deployment-provided
+file. A malformed file disables delivery with a single configuration error.
+
 Report for a finished session:
 
 ```bash

@@ -15,8 +15,8 @@
 //   tokenFile / AGENT_METRICS_TOKEN_FILE   raw token file, reread per push
 //   job, runtime, instance, labels, debug  see integrations/common/config.mjs
 
-import { basename } from "node:path";
-import { hostname } from "node:os";
+import { basename, join } from "node:path";
+import { homedir, hostname } from "node:os";
 
 import { resolveMetricsConfig } from "../common/config.mjs";
 import { createTokenProvider } from "../common/token-provider.mjs";
@@ -24,6 +24,19 @@ import { createPushgatewayClient } from "../common/pushgateway.mjs";
 import { createSessionAggregator } from "../common/session-aggregator.mjs";
 import { createEventMetrics } from "../common/event-metrics.mjs";
 import { countDiffLines } from "../common/diff-lines.mjs";
+
+// npm-installed plugins receive no options, so the host's configuration root
+// is where the deployment delivers agent-metrics.json. Candidates: the root
+// the agent exports (Desktop), then the standard OpenCode config locations.
+export function configFilePathCandidates(env = process.env, home = homedir()) {
+  return [
+    env.OPENCODE_CONFIG_DIR,
+    join(home, ".config", "opencode"),
+    join(home, ".opencode"),
+  ]
+    .filter(Boolean)
+    .map((root) => join(root, "agent-metrics.json"));
+}
 
 function normalizeUsage(tokens = {}) {
   return {
@@ -41,6 +54,7 @@ export const MetricsPlugin = async (input, options = {}) => {
     env: process.env,
     runtime: "opencode",
     defaults: { instance: hostname() },
+    configFilePath: configFilePathCandidates(),
   });
   const client = createPushgatewayClient({ config, tokenProvider: createTokenProvider(config) });
   const metrics = createEventMetrics({ config, client, aggregator: createSessionAggregator() });

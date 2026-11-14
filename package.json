@@ -15,5 +15,10 @@
   },
   "devDependencies": {
     "esbuild": "0.25.5"
-  }
+  },
+  "exports": "./dist/opencode/v1/plugin.js",
+  "files": [
+    "dist",
+    "plugin.json"
+  ]
 }

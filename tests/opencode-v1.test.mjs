@@ -289,3 +289,32 @@ test("opencode v1 maps permission replies to allow and deny decisions", async ()
     await plugin.dispose();
   });
 });
+
+test("opencode v1 reads deployment config file from OPENCODE_CONFIG_DIR", async () => {
+  const { mkdtemp, writeFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  const root = await mkdtemp(path.join(tmpdir(), "arm-opencode-cfg-"));
+  await writeFile(
+    path.join(root, "agent-metrics.json"),
+    JSON.stringify({ endpoint: "https://filecfg.example/push" }),
+  );
+
+  const savedDir = process.env.OPENCODE_CONFIG_DIR;
+  process.env.OPENCODE_CONFIG_DIR = root;
+  const fetch = fetchRecorder();
+  try {
+    await withFetch(fetch, async () => {
+      const plugin = await MetricsPlugin({ project: { id: "proj-1" }, directory: "/work/demo" }, {});
+      await plugin.event({ event: usageMessage("ses_A-full", "m1", { input: 100 }) });
+      await settle();
+      assert.equal(fetch.calls.length, 1); // config file alone enabled delivery
+      fetch.deliverAll();
+      await settle();
+      await plugin.dispose();
+    });
+  } finally {
+    if (savedDir === undefined) delete process.env.OPENCODE_CONFIG_DIR;
+    else process.env.OPENCODE_CONFIG_DIR = savedDir;
+  }
+});
