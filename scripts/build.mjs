@@ -29,5 +29,6 @@ const common = {
 };
 
 await build({ ...common, entryPoints: ["integrations/opencode/plugin.js"], outfile: `${distRoot}/dist/opencode/v1/plugin.js` });
+await build({ ...common, entryPoints: ["integrations/opencode/embed.mjs"], outfile: `${distRoot}/dist/opencode/v1/core.embed.js` });
 // push-metrics.mjs starts with its own shebang; esbuild preserves it
 await build({ ...common, entryPoints: ["integrations/claude-code/push-metrics.mjs"], outfile: `${distRoot}/dist/claude-code/push-metrics.mjs` });

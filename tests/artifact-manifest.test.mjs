@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 
 import packageJson from "../package.json" with { type: "json" };
@@ -26,4 +26,12 @@ test("plugin.json identifies the plugin and matches package.json version", async
   assert.equal(manifest.name, "agent-run-metrics");
   assert.match(manifest.$schema, /plugin\.schema\.json$/);
   assert.equal(manifest.version, packageJson.version);
+});
+
+test("core embed variant ships without export statements", () => {
+  const embedPath = "dist/opencode/v1/core.embed.js";
+  assert.ok(existsSync(embedPath), "embed bundle is missing; run npm run build");
+  const text = readFileSync(embedPath, "utf8");
+  assert.match(text, /__agentRunMetricsCore/, "embed must expose the core handle");
+  assert.doesNotMatch(text, /(^|\n)export /, "embed bundle must not contain export statements");
 });
