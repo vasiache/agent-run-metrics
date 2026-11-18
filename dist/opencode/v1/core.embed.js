@@ -108,20 +108,30 @@ function resolveMetricsConfig({ options = {}, env = process.env, runtime, defaul
 
 // integrations/common/token-provider.mjs
 import { readFile as defaultReadFile } from "node:fs/promises";
+import { homedir as defaultHomedir } from "node:os";
+function resolveTokenPath(path, homedir2) {
+  if (path.startsWith("~/")) return `${homedir2()}/${path.slice(2)}`;
+  return path;
+}
 var TokenConfigurationError = class extends Error {
   constructor(message, options) {
     super(message, options);
     this.name = "TokenConfigurationError";
   }
 };
-function createTokenProvider({ token, tokenFile, readFile = defaultReadFile } = {}) {
+function createTokenProvider({
+  token,
+  tokenFile,
+  readFile = defaultReadFile,
+  homedir: homedir2 = defaultHomedir
+} = {}) {
   const direct = typeof token === "string" ? token.trim() : "";
   if (direct) return async () => direct;
   if (!tokenFile) return async () => null;
   return async () => {
     let contents;
     try {
-      contents = await readFile(tokenFile, "utf8");
+      contents = await readFile(resolveTokenPath(tokenFile, homedir2), "utf8");
     } catch (error) {
       throw new TokenConfigurationError("configured token file could not be read", { cause: error });
     }

@@ -75,3 +75,18 @@ test("token provider is not invoked for disabled configuration", async () => {
   if (config.enabled) await provider();
   assert.equal(reads, 0);
 });
+
+test("token file path expands leading tilde to the user home directory", async () => {
+  const seen = [];
+  const provider = createTokenProvider({
+    tokenFile: "~/custom/gateway.token",
+    readFile: async (path) => {
+      seen.push(path);
+      return "token-from-home";
+    },
+    homedir: () => "/home/tester",
+  });
+  const token = await provider();
+  assert.equal(token, "token-from-home");
+  assert.deepEqual(seen, ["/home/tester/custom/gateway.token"]);
+});

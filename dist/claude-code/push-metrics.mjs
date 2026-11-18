@@ -10,20 +10,30 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 // integrations/common/token-provider.mjs
 import { readFile as defaultReadFile } from "node:fs/promises";
+import { homedir as defaultHomedir } from "node:os";
+function resolveTokenPath(path2, homedir) {
+  if (path2.startsWith("~/")) return `${homedir()}/${path2.slice(2)}`;
+  return path2;
+}
 var TokenConfigurationError = class extends Error {
   constructor(message, options) {
     super(message, options);
     this.name = "TokenConfigurationError";
   }
 };
-function createTokenProvider({ token, tokenFile, readFile: readFile2 = defaultReadFile } = {}) {
+function createTokenProvider({
+  token,
+  tokenFile,
+  readFile: readFile2 = defaultReadFile,
+  homedir = defaultHomedir
+} = {}) {
   const direct = typeof token === "string" ? token.trim() : "";
   if (direct) return async () => direct;
   if (!tokenFile) return async () => null;
   return async () => {
     let contents;
     try {
-      contents = await readFile2(tokenFile, "utf8");
+      contents = await readFile2(resolveTokenPath(tokenFile, homedir), "utf8");
     } catch (error) {
       throw new TokenConfigurationError("configured token file could not be read", { cause: error });
     }
